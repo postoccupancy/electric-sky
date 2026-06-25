@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include "Camera.h"
+#include <Wire.h>
+#define I2C_SCL 41
+#define I2C_SDA 42
 
 Camera camera;
 
@@ -23,7 +26,20 @@ void setup() {
     Serial.printf("Captured frame: %u bytes, %u x %u\n", fb->len, fb->width, fb->height);
     camera.release(fb);
   }
+
+  Serial.println("Scanning I2C...");
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("I2C found: 0x%02X (%u)\n", addr, addr);
+    }
+  }
+
 }
+
+
 
 void loop() {
   Serial.println("alive");
