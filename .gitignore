@@ -1,2 +1,3 @@
 archives
 .env
+*.code-workspace
