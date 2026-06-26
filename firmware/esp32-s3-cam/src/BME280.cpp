@@ -14,9 +14,19 @@ bool BME280::begin(TwoWire& wire) {
 
 BME280Reading BME280::read() {
   BME280Reading r;
+  r.ok = true;
+
   r.tempC = _bme->readTemperature();
   r.tempF = r.tempC * 9.0f / 5.0f + 32.0f;
   r.humidity = _bme->readHumidity();
   r.pressureHpa = _bme->readPressure() / 100.0f;
+
+  if (isnan(r.tempC) || isnan(r.humidity) || isnan(r.pressureHpa) ||
+      r.tempC < -40 || r.tempC > 85 ||
+      r.humidity < 0 || r.humidity > 100 ||
+      r.pressureHpa < 300 || r.pressureHpa > 1100) {
+    r.ok = false;
+  }
+
   return r;
 }

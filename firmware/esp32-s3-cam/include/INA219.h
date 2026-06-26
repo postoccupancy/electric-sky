@@ -3,12 +3,12 @@
 #include <Wire.h>
 
 struct INA219Reading {
+  bool ok;
   float busVoltageV;
   float shuntVoltageMv;
   float currentMa;
   float powerMw;
 };
-
 class INA219 {
 public:
   explicit INA219(uint8_t address = 0x40, float shuntOhms = 0.1f);

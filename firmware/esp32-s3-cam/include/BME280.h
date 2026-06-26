@@ -3,6 +3,7 @@
 #include <Wire.h>
 
 struct BME280Reading {
+  bool ok;
   float tempC;
   float tempF;
   float humidity;

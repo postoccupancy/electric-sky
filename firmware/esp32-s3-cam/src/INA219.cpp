@@ -66,9 +66,17 @@ INA219Reading INA219::read() {
   uint16_t rawPower = read16(REG_POWER);
 
   INA219Reading r;
+  r.ok = true;
   r.busVoltageV = ((rawBus >> 3) * 0.004f);
   r.shuntVoltageMv = rawShunt * 0.01f;
   r.currentMa = rawCurrent * _currentLsb * 1000.0f;
   r.powerMw = rawPower * _powerLsb * 1000.0f;
   return r;
+
+  if (r.powerMw < -10000 || r.powerMw > 10000 ||
+      r.busVoltageV < 0 || r.busVoltageV > 32) {
+    r.ok = false;
+  }
+
 }
+
