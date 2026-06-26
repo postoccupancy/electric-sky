@@ -3,6 +3,7 @@
 #include "Camera.h"
 #include "INA219.h"
 #include "BME280.h"
+#include "INMP441.h"
 
 #define I2C_SCL 41
 #define I2C_SDA 42
@@ -10,6 +11,7 @@
 Camera camera;
 INA219 ina;
 BME280 bme;
+INMP441 mic;
 
 void setup() {
   delay(8000);
@@ -72,6 +74,27 @@ void setup() {
       b.humidity,
       b.pressureHpa
     );
+  }
+
+  // INMP441 setup
+  if (!mic.begin()) {
+    Serial.println("INMP441 failed");
+  } else {
+    Serial.println("INMP441 OK");
+    AudioObservables a;
+    if (mic.read(a)) {
+      Serial.printf(
+        "INMP441 rms_db=%.2f peak_db=%.2f zcr=%.5f crest=%.3f samples=%d elapsed=%lu ms\n",
+        a.rmsDb,
+        a.peakDb,
+        a.zcr,
+        a.crestFactor,
+        a.samples,
+        a.elapsedMs
+      );
+    } else {
+      Serial.println("INMP441 read failed");
+    }
   }
   
 }
