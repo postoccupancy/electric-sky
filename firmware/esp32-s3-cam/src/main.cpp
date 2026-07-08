@@ -249,7 +249,7 @@ var e_reading=addRow('frame','Sensor reading','');
 var e_ts=addRow('timestamp','Timestamp','UTC');
 
 function connect(){
-  var ws=new WebSocket('ws://'+location.hostname+':81/');
+  var ws=new WebSocket('ws://{{IP}}:81/');
   ws.onopen=function(){status.innerHTML='<span class="dot"></span>live';};
   ws.onmessage=function(e){
     var d=JSON.parse(e.data);
@@ -272,8 +272,10 @@ connect();
 </script>
 </body>
 </html>)";
+    String page(html);
+    page.replace("{{IP}}", WiFi.localIP().toString());
     server.sendHeader("Connection", "close");
-    server.send(200, "text/html", html);
+    server.send(200, "text/html", page);
     server.client().stop();
   });
 
