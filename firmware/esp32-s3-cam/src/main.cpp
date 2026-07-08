@@ -212,7 +212,7 @@ h1{color:#adf;margin:0 0 1.5rem;font-size:1.4rem;letter-spacing:.05em}
 .label{color:#888;font-size:.85rem}
 .value{color:#fff;font-size:1.1rem}
 .unit{color:#666;font-size:.8rem;margin-left:.3rem}
-#status{font-size:.8rem;color:#aaa;margin-top:1.2rem}
+#statusEl{font-size:.8rem;color:#aaa;margin-top:1.2rem}
 .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f4;margin-right:.4rem;vertical-align:middle}
 .dot.err{background:#f44}
 </style>
@@ -220,14 +220,14 @@ h1{color:#adf;margin:0 0 1.5rem;font-size:1.4rem;letter-spacing:.05em}
 <body>
 <h1>Electric Sky</h1>
 <div id="rows"></div>
-<div id="status">connecting...</div>
+<div id="statusEl">connecting...</div>
 <script>
 function fmt_uptime(ms){
   var s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
   return (h?h+'h ':'')+m+'m '+sec+'s';
 }
 var rows=document.getElementById('rows');
-var status=document.getElementById('status');
+var statusEl=document.getElementById('statusEl');
 var computed={};
 
 function addRow(id,label,unit){
@@ -250,10 +250,10 @@ var e_ts=addRow('timestamp','Timestamp','UTC');
 
 function connect(){
   var ws=new WebSocket('ws://{{IP}}:81/');
-  ws.onopen=function(){status.innerHTML='<span class="dot"></span>live';};
+  ws.onopen=function(){statusEl.innerHTML='<span class="dot"></span>live';};
   ws.onmessage=function(e){
     var d=JSON.parse(e.data);
-    if(d.error){status.innerHTML='<span class="dot err"></span>'+d.error;return;}
+    if(d.error){statusEl.innerHTML='<span class="dot err"></span>'+d.error;return;}
     e_tempC.textContent=d.temp_c.toFixed(2);
     e_tempF.textContent=(d.temp_c*9/5+32).toFixed(2);
     e_hum.textContent=d.humidity.toFixed(2);
@@ -263,9 +263,9 @@ function connect(){
     e_uptime.textContent=fmt_uptime(d.uptime_ms);
     e_reading.textContent='#'+d.frame+' (every 5s)';
     e_ts.textContent=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'—';
-    status.innerHTML='<span class="dot"></span>live &mdash; updates every 500ms';
+    statusEl.innerHTML='<span class="dot"></span>live &mdash; updates every 500ms';
   };
-  ws.onclose=function(){status.innerHTML='<span class="dot err"></span>reconnecting...';setTimeout(connect,2000);};
+  ws.onclose=function(){statusEl.innerHTML='<span class="dot err"></span>reconnecting...';setTimeout(connect,2000);};
   ws.onerror=function(){ws.close();};
 }
 connect();
