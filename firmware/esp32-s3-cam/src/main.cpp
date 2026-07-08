@@ -3,16 +3,16 @@
 #include "SensorManager.h"
 
 #include <WiFi.h>
-
 #include <ESPmDNS.h>
 #include <time.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
 
 const char* WIFI_SSID = "Knight-MacDonald";
 const char* WIFI_PASSWORD = "409Jasper!";
 
-#include <WebServer.h>
-
 WebServer server(80);
+WebSocketsServer webSocket(81);
 SensorManager sensors;
 
 static SemaphoreHandle_t frameMutex;
@@ -20,6 +20,49 @@ static SensorFrame latestFrame;
 static bool hasFrame = false;
 
 volatile bool otaInProgress = false;
+
+// --- helpers ---
+
+static String isoTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 10)) return "";
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buf);
+}
+
+static bool getLatestFrameCopy(SensorFrame& out) {
+  xSemaphoreTake(frameMutex, portMAX_DELAY);
+  bool ok = hasFrame;
+  if (ok) out = latestFrame;
+  xSemaphoreGive(frameMutex);
+  return ok;
+}
+
+static String makeStatusJson(bool* okOut = nullptr) {
+  SensorFrame frame;
+  bool ok = getLatestFrameCopy(frame);
+
+  if (okOut) *okOut = ok;
+
+  if (!ok) return "{\"error\":\"no frame yet\"}";
+
+  String json = "{";
+  json += "\"frame\":" + String(frame.frameId) + ",";
+  json += "\"uptime_ms\":" + String(millis()) + ",";
+  json += "\"timestamp\":\"" + isoTime() + "\",";
+  json += "\"temp_ok\":" + String(frame.climate.ok ? "true" : "false") + ",";
+  json += "\"temp_c\":" + String(frame.climate.tempC, 2) + ",";
+  json += "\"humidity\":" + String(frame.climate.humidity, 2) + ",";
+  json += "\"pressure_hpa\":" + String(frame.climate.pressureHpa, 2) + ",";
+  json += "\"power_ok\":" + String(frame.power.ok ? "true" : "false") + ",";
+  json += "\"power_mw\":" + String(frame.power.powerMw, 3) + ",";
+  json += "\"audio_rms_db\":" + String(frame.audio.rmsDb, 2);
+  json += "}";
+  return json;
+}
+
+// --- OTA ---
 
 void setupOTA() {
   ArduinoOTA.setHostname("electric-sky");
@@ -50,20 +93,10 @@ void setupOTA() {
   ArduinoOTA.begin();
 
   Serial.println("OTA ready");
-  Serial.print("OTA hostname: ");
-  Serial.println("electric-sky.local");
+  Serial.println("OTA hostname: electric-sky.local");
 }
 
-String isoTime() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 10)) {
-    return "";
-  }
-
-  char buf[25];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-  return String(buf);
-}
+// --- sensor task ---
 
 static void sensorTask(void*) {
   const TickType_t interval = pdMS_TO_TICKS(5000);
@@ -82,6 +115,28 @@ static void sensorTask(void*) {
     xSemaphoreGive(frameMutex);
   }
 }
+
+// --- WebSocket ---
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED: {
+      Serial.printf("[WS] client %u connected\n", num);
+      String json = makeStatusJson();
+      webSocket.sendTXT(num, json);
+      break;
+    }
+
+    case WStype_DISCONNECTED:
+      Serial.printf("[WS] client %u disconnected\n", num);
+      break;
+
+    default:
+      break;
+  }
+}
+
+// --- setup / loop ---
 
 void setup() {
   Serial.begin(115200);
@@ -137,54 +192,42 @@ void setup() {
   setupOTA();
 
   server.on("/status", []() {
-    SensorFrame frame;
-    bool gotFrame = false;
-
-    xSemaphoreTake(frameMutex, portMAX_DELAY);
-    frame = latestFrame;
-    gotFrame = hasFrame;
-    xSemaphoreGive(frameMutex);
-
-    if (!gotFrame) {
-      server.sendHeader("Connection", "close");
-      server.sendHeader("Cache-Control", "no-store");
-      server.sendHeader("Access-Control-Allow-Origin", "*");
-      server.send(503, "application/json", "{\"error\":\"no frame yet\"}");
-      server.client().stop();
-      return;
-    }
-
-    String json = "{";
-    json += "\"frame\":" + String(frame.frameId) + ",";
-    json += "\"uptime_ms\":" + String(millis()) + ",";
-    json += "\"timestamp\":\"" + isoTime() + "\",";
-    json += "\"temp_ok\":" + String(frame.climate.ok ? "true" : "false") + ",";
-    json += "\"temp_c\":" + String(frame.climate.tempC, 2) + ",";
-    json += "\"humidity\":" + String(frame.climate.humidity, 2) + ",";
-    json += "\"pressure_hpa\":" + String(frame.climate.pressureHpa, 2) + ",";
-    json += "\"power_ok\":" + String(frame.power.ok ? "true" : "false") + ",";
-    json += "\"power_mw\":" + String(frame.power.powerMw, 3) + ",";
-    json += "\"audio_rms_db\":" + String(frame.audio.rmsDb, 2);
-    json += "}";
-
+    bool ok = false;
+    String json = makeStatusJson(&ok);
     server.sendHeader("Connection", "close");
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
+    server.send(ok ? 200 : 503, "application/json", json);
     server.client().stop();
   });
 
   server.on("/favicon.ico", []() {
     server.send(204);
+    server.client().stop();
   });
 
   server.begin();
   Serial.println("HTTP server started");
   Serial.println("Open: http://" + WiFi.localIP().toString() + "/status");
+
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  Serial.println("WebSocket started: ws://electric-sky.local:81/");
 }
 
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
+  webSocket.loop();
+
+  static unsigned long lastWsBroadcast = 0;
+  const unsigned long WS_BROADCAST_MS = 500;
+
+  if (millis() - lastWsBroadcast >= WS_BROADCAST_MS) {
+    lastWsBroadcast = millis();
+    String json = makeStatusJson();
+    webSocket.broadcastTXT(json);
+  }
+
   delay(1);
 }
