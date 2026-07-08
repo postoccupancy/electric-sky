@@ -263,7 +263,7 @@ function connect(){
     e_uptime.textContent=fmt_uptime(d.uptime_ms);
     e_reading.textContent='#'+d.frame+' (every 5s)';
     e_ts.textContent=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'—';
-    statusEl.innerHTML='<span class="dot"></span>live &mdash; updates every 500ms';
+    statusEl.innerHTML='<span class="dot"></span>live';
   };
   ws.onclose=function(){statusEl.innerHTML='<span class="dot err"></span>reconnecting...';setTimeout(connect,2000);};
   ws.onerror=function(){ws.close();};
@@ -316,7 +316,7 @@ void loop() {
   webSocket.loop();
 
   static unsigned long lastWsBroadcast = 0;
-  const unsigned long WS_BROADCAST_MS = 500;
+  const unsigned long WS_BROADCAST_MS = 250;
 
   if (millis() - lastWsBroadcast >= WS_BROADCAST_MS) {
     lastWsBroadcast = millis();
