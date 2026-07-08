@@ -58,8 +58,6 @@ int16_t INA219::read16Signed(uint8_t reg) {
 }
 
 INA219Reading INA219::read() {
-  calibrate();
-
   uint16_t rawBus = read16(REG_BUS_VOLTAGE);
   int16_t rawShunt = read16Signed(REG_SHUNT_VOLTAGE);
   int16_t rawCurrent = read16Signed(REG_CURRENT);
@@ -71,12 +69,12 @@ INA219Reading INA219::read() {
   r.shuntVoltageMv = rawShunt * 0.01f;
   r.currentMa = rawCurrent * _currentLsb * 1000.0f;
   r.powerMw = rawPower * _powerLsb * 1000.0f;
-  return r;
 
   if (r.powerMw < -10000 || r.powerMw > 10000 ||
       r.busVoltageV < 0 || r.busVoltageV > 32) {
     r.ok = false;
   }
+  return r;
 
 }
 

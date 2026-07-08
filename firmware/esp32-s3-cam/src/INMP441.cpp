@@ -46,7 +46,7 @@ bool INMP441::begin() {
 bool INMP441::read(AudioObservables& out) {
   uint32_t start = millis();
 
-  int32_t samples[_frameSize];
+  int32_t samples[512];
   size_t bytesRead = 0;
 
   esp_err_t err = i2s_read(

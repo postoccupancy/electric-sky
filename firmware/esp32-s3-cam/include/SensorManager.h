@@ -22,6 +22,7 @@ public:
 
 private:
   Camera camera;
+  bool _cameraOk = false;
   INA219 ina;
   BME280 bme;
   INMP441 mic;

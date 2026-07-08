@@ -15,22 +15,21 @@ void SensorManager::scanI2C() {
 
 bool SensorManager::begin() {
   Serial.println("Initializing Camera...");
-  if (!camera.begin()) {
-    Serial.println("  Camera FAILED");
-    return false;
-  }
-  Serial.println("  Camera OK");
-
-  camera_fb_t* fb = camera.capture();
-  if (fb) {
-    Serial.printf("  Camera captured: %u bytes, %u x %u\n", fb->len, fb->width, fb->height);
-    camera.release(fb);
+  _cameraOk = camera.begin();
+  if (!_cameraOk) {
+    Serial.println("  Camera FAILED — continuing without camera");
   } else {
-    Serial.println("  Camera capture FAILED");
+    Serial.println("  Camera OK");
+    camera_fb_t* fb = camera.capture();
+    if (fb) {
+      Serial.printf("  Camera captured: %u bytes, %u x %u\n", fb->len, fb->width, fb->height);
+      camera.release(fb);
+    }
   }
 
   Serial.println("Initializing I2C...");
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setTimeOut(50);
   scanI2C();
 
   Serial.println("Initializing INA219...");
@@ -63,9 +62,16 @@ SensorFrame SensorManager::read() {
   frame.frameId = ++frameId;
   frame.timestampMs = millis();
 
+  unsigned long t0 = millis();
   frame.power = ina.read();
+  unsigned long t1 = millis();
   frame.climate = bme.read();
+  unsigned long t2 = millis();
   mic.read(frame.audio);
+  unsigned long t3 = millis();
+
+  Serial.printf("sensor timing — ina:%lums bme:%lums mic:%lums\n",
+    t1 - t0, t2 - t1, t3 - t2);
 
   return frame;
 }
