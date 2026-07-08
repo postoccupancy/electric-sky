@@ -89,6 +89,7 @@ void setupOTA() {
     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect failed");
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive failed");
     else if (error == OTA_END_ERROR) Serial.println("End failed");
+    otaInProgress = false;
   });
 
   ArduinoOTA.begin();
