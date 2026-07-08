@@ -8,8 +8,9 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
-const char* WIFI_SSID = "Knight-MacDonald_EXT";
-const char* WIFI_PASSWORD = "409Jasper!";
+const char* WIFI_SSID      = "Knight-MacDonald";
+const char* WIFI_SSID_FB   = "Knight-MacDonald_EXT";  // fallback
+const char* WIFI_PASSWORD  = "409Jasper!";
 
 WebServer server(80);
 WebSocketsServer webSocket(81);
@@ -160,27 +161,31 @@ void setup() {
 
   xTaskCreatePinnedToCore(sensorTask, "sensors", 8192, nullptr, 1, nullptr, 1);
 
-  Serial.print("Connecting to WiFi");
+  auto tryConnect = [](const char* ssid, const char* pass, int maxAttempts) -> bool {
+    Serial.printf("Connecting to %s", ssid);
+    WiFi.begin(ssid, pass);
+    for (int i = 0; i < maxAttempts; i++) {
+      if (WiFi.status() == WL_CONNECTED) break;
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
+    return WiFi.status() == WL_CONNECTED;
+  };
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  bool connected = tryConnect(WIFI_SSID, WIFI_PASSWORD, 20);
+  if (!connected) {
+    Serial.println("Primary failed, trying fallback");
+    WiFi.disconnect(true);
     delay(500);
-    Serial.print(".");
-    attempts++;
+    connected = tryConnect(WIFI_SSID_FB, WIFI_PASSWORD, 20);
   }
 
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("RSSI: ");
-    Serial.println(WiFi.RSSI());
+  if (connected) {
+    Serial.printf("WiFi connected: %s  IP: %s  RSSI: %d\n",
+      WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    Serial.println("WiFi connection failed");
+    Serial.println("WiFi connection failed on both SSIDs");
   }
 
   WiFi.setSleep(false);
@@ -319,10 +324,18 @@ void loop() {
 
   // Reconnect if WiFi drops; skip during OTA to avoid disrupting the transfer
   static unsigned long lastWifiCheck = 0;
+  static uint8_t wifiFailCount = 0;
   if (!otaInProgress && millis() - lastWifiCheck >= 30000) {
     lastWifiCheck = millis();
     if (WiFi.status() != WL_CONNECTED) {
-      WiFi.reconnect();
+      wifiFailCount++;
+      const char* ssid = (wifiFailCount % 2 == 0) ? WIFI_SSID_FB : WIFI_SSID;
+      WiFi.disconnect(true);
+      delay(200);
+      WiFi.begin(ssid, WIFI_PASSWORD);
+      Serial.printf("WiFi reconnect attempt %u on %s\n", wifiFailCount, ssid);
+    } else {
+      wifiFailCount = 0;
     }
   }
 
