@@ -8,8 +8,8 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
-const char* WIFI_SSID      = "Knight-MacDonald";
-const char* WIFI_SSID_FB   = "Knight-MacDonald_EXT";  // fallback
+const char* WIFI_SSID      = "Knight-MacDonald_EXT";  // 2.4GHz extender, closer to device
+const char* WIFI_SSID_FB   = "Knight-MacDonald";      // fallback
 const char* WIFI_PASSWORD  = "409Jasper!";
 
 WebServer server(80);
