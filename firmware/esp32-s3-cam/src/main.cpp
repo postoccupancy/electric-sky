@@ -193,6 +193,71 @@ void setup() {
 
   setupOTA();
 
+  server.on("/", []() {
+    static const char html[] PROGMEM = R"(<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Electric Sky</title>
+<style>
+body{font-family:monospace;background:#111;color:#eee;padding:2rem;max-width:480px}
+h1{color:#adf;margin:0 0 1.5rem;font-size:1.4rem;letter-spacing:.05em}
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:.45rem 0;border-bottom:1px solid #222}
+.label{color:#666;font-size:.85rem}
+.value{color:#fff;font-size:1.1rem}
+.unit{color:#555;font-size:.8rem;margin-left:.3rem}
+#status{font-size:.75rem;color:#555;margin-top:1.2rem}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f4;margin-right:.4rem;vertical-align:middle}
+.dot.err{background:#f44}
+</style>
+</head>
+<body>
+<h1>&#9679; Electric Sky</h1>
+<div id="rows"></div>
+<div id="status">connecting...</div>
+<script>
+var F=[
+  ['temp_c','Temperature',function(v){return v.toFixed(2)},'°C'],
+  ['humidity','Humidity',function(v){return v.toFixed(1)},'%'],
+  ['pressure_hpa','Pressure',function(v){return v.toFixed(1)},'hPa'],
+  ['power_mw','Solar power',function(v){return v.toFixed(0)},'mW'],
+  ['audio_rms_db','Audio RMS',function(v){return v.toFixed(1)},'dBFS'],
+  ['uptime_ms','Uptime',function(v){return (v/1000).toFixed(0)},'s'],
+  ['frame','Frame',function(v){return '#'+v},'']
+];
+var rows=document.getElementById('rows');
+var status=document.getElementById('status');
+var els={};
+F.forEach(function(f){
+  var d=document.createElement('div');
+  d.className='row';
+  d.innerHTML='<span class="label">'+f[1]+'</span><span><span class="value" id="v_'+f[0]+'">—</span><span class="unit">'+f[3]+'</span></span>';
+  rows.appendChild(d);
+  els[f[0]]=document.getElementById('v_'+f[0]);
+});
+function connect(){
+  var ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws.onopen=function(){status.innerHTML='<span class="dot"></span>live';};
+  ws.onmessage=function(e){
+    var d=JSON.parse(e.data);
+    if(d.error){status.textContent=d.error;return;}
+    F.forEach(function(f){if(els[f[0]]&&d[f[0]]!==undefined)els[f[0]].textContent=f[2](d[f[0]]);});
+    var ts=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'';
+    status.innerHTML='<span class="dot"></span>'+ts+' UTC';
+  };
+  ws.onclose=function(){status.innerHTML='<span class="dot err"></span>reconnecting...';setTimeout(connect,2000);};
+  ws.onerror=function(){ws.close();};
+}
+connect();
+</script>
+</body>
+</html>)";
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", html);
+    server.client().stop();
+  });
+
   server.on("/status", []() {
     bool ok = false;
     String json = makeStatusJson(&ok);
