@@ -53,9 +53,9 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"uptime_ms\":" + String(millis()) + ",";
   json += "\"timestamp\":\"" + isoTime() + "\",";
   json += "\"temp_ok\":" + String(frame.climate.ok ? "true" : "false") + ",";
-  json += "\"temp_c\":" + String(frame.climate.tempC, 2) + ",";
-  json += "\"humidity\":" + String(frame.climate.humidity, 2) + ",";
-  json += "\"pressure_hpa\":" + String(frame.climate.pressureHpa, 2) + ",";
+  json += "\"temp_c\":" + String(frame.climate.tempC, 4) + ",";
+  json += "\"humidity\":" + String(frame.climate.humidity, 4) + ",";
+  json += "\"pressure_hpa\":" + String(frame.climate.pressureHpa, 4) + ",";
   json += "\"power_ok\":" + String(frame.power.ok ? "true" : "false") + ",";
   json += "\"power_mw\":" + String(frame.power.powerMw, 3) + ",";
   json += "\"audio_rms_db\":" + String(frame.audio.rmsDb, 2);
@@ -102,7 +102,7 @@ void setupOTA() {
 // --- sensor task ---
 
 static void sensorTask(void*) {
-  const TickType_t interval = pdMS_TO_TICKS(5000);
+  const TickType_t interval = pdMS_TO_TICKS(500);
   TickType_t lastWake = xTaskGetTickCount();
 
   while (true) {
@@ -254,10 +254,10 @@ function connect(){
   ws.onmessage=function(e){
     var d=JSON.parse(e.data);
     if(d.error){statusEl.innerHTML='<span class="dot err"></span>'+d.error;return;}
-    e_tempC.textContent=d.temp_c.toFixed(2);
-    e_tempF.textContent=(d.temp_c*9/5+32).toFixed(2);
-    e_hum.textContent=d.humidity.toFixed(2);
-    e_pres.textContent=d.pressure_hpa.toFixed(2);
+    e_tempC.textContent=d.temp_c.toFixed(4);
+    e_tempF.textContent=(d.temp_c*9/5+32).toFixed(4);
+    e_hum.textContent=d.humidity.toFixed(4);
+    e_pres.textContent=d.pressure_hpa.toFixed(4);
     e_power.textContent=d.power_mw.toFixed(0);
     e_audio.textContent=d.audio_rms_db.toFixed(1);
     e_uptime.textContent=fmt_uptime(d.uptime_ms);

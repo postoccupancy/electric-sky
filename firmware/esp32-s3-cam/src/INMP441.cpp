@@ -49,6 +49,11 @@ bool INMP441::read(AudioObservables& out) {
   int32_t samples[512];
   size_t bytesRead = 0;
 
+  // Drain any stale frames backed up in the DMA ring buffer so the
+  // blocking read below captures the most recent audio, not old data.
+  size_t tmp;
+  while (i2s_read(I2S_PORT, samples, sizeof(samples), &tmp, 0) == ESP_OK && tmp > 0) {}
+
   esp_err_t err = i2s_read(
     I2S_PORT,
     samples,
