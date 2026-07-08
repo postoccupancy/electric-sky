@@ -8,7 +8,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
-const char* WIFI_SSID = "Knight-MacDonald";
+const char* WIFI_SSID = "Knight-MacDonald_EXT";
 const char* WIFI_PASSWORD = "409Jasper!";
 
 WebServer server(80);
