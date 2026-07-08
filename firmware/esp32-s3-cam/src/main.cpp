@@ -150,6 +150,7 @@ void setup() {
       server.sendHeader("Cache-Control", "no-store");
       server.sendHeader("Access-Control-Allow-Origin", "*");
       server.send(503, "application/json", "{\"error\":\"no frame yet\"}");
+      server.client().stop();
       return;
     }
 
@@ -170,6 +171,7 @@ void setup() {
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
+    server.client().stop();
   });
 
   server.on("/favicon.ico", []() {
