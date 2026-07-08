@@ -70,6 +70,7 @@ void setupOTA() {
 
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
+    sensors.stopForOTA();
     Serial.println("OTA start");
   });
 
@@ -201,6 +202,13 @@ void setup() {
     server.client().stop();
   });
 
+  server.on("/restart", []() {
+    server.send(200, "text/plain", "restarting");
+    server.client().stop();
+    delay(200);
+    ESP.restart();
+  });
+
   server.on("/favicon.ico", []() {
     server.send(204);
     server.client().stop();
@@ -227,6 +235,15 @@ void loop() {
     lastWsBroadcast = millis();
     String json = makeStatusJson();
     webSocket.broadcastTXT(json);
+  }
+
+  // Reconnect if WiFi drops; skip during OTA to avoid disrupting the transfer
+  static unsigned long lastWifiCheck = 0;
+  if (!otaInProgress && millis() - lastWifiCheck >= 30000) {
+    lastWifiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+    }
   }
 
   delay(1);

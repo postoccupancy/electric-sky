@@ -19,6 +19,7 @@ class SensorManager {
 public:
   bool begin();
   SensorFrame read();
+  void stopForOTA();
 
 private:
   Camera camera;
