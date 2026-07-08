@@ -204,47 +204,61 @@ void setup() {
 body{font-family:monospace;background:#111;color:#eee;padding:2rem;max-width:480px}
 h1{color:#adf;margin:0 0 1.5rem;font-size:1.4rem;letter-spacing:.05em}
 .row{display:flex;justify-content:space-between;align-items:baseline;padding:.45rem 0;border-bottom:1px solid #222}
-.label{color:#666;font-size:.85rem}
+.label{color:#888;font-size:.85rem}
 .value{color:#fff;font-size:1.1rem}
-.unit{color:#555;font-size:.8rem;margin-left:.3rem}
-#status{font-size:.75rem;color:#555;margin-top:1.2rem}
+.unit{color:#666;font-size:.8rem;margin-left:.3rem}
+#status{font-size:.8rem;color:#aaa;margin-top:1.2rem}
 .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f4;margin-right:.4rem;vertical-align:middle}
 .dot.err{background:#f44}
 </style>
 </head>
 <body>
-<h1>&#9679; Electric Sky</h1>
+<h1>Electric Sky</h1>
 <div id="rows"></div>
 <div id="status">connecting...</div>
 <script>
-var F=[
-  ['temp_c','Temperature',function(v){return v.toFixed(2)},'°C'],
-  ['humidity','Humidity',function(v){return v.toFixed(1)},'%'],
-  ['pressure_hpa','Pressure',function(v){return v.toFixed(1)},'hPa'],
-  ['power_mw','Solar power',function(v){return v.toFixed(0)},'mW'],
-  ['audio_rms_db','Audio RMS',function(v){return v.toFixed(1)},'dBFS'],
-  ['uptime_ms','Uptime',function(v){return (v/1000).toFixed(0)},'s'],
-  ['frame','Frame',function(v){return '#'+v},'']
-];
+function fmt_uptime(ms){
+  var s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+  return (h?h+'h ':'')+m+'m '+sec+'s';
+}
 var rows=document.getElementById('rows');
 var status=document.getElementById('status');
-var els={};
-F.forEach(function(f){
+var computed={};
+
+function addRow(id,label,unit){
   var d=document.createElement('div');
   d.className='row';
-  d.innerHTML='<span class="label">'+f[1]+'</span><span><span class="value" id="v_'+f[0]+'">—</span><span class="unit">'+f[3]+'</span></span>';
+  d.innerHTML='<span class="label">'+label+'</span><span><span class="value" id="v_'+id+'">—</span><span class="unit">'+unit+'</span></span>';
   rows.appendChild(d);
-  els[f[0]]=document.getElementById('v_'+f[0]);
-});
+  return document.getElementById('v_'+id);
+}
+
+var e_tempC=addRow('temp_c','Temperature','°C');
+var e_tempF=addRow('temp_f','Temperature','°F');
+var e_hum=addRow('humidity','Humidity','%');
+var e_pres=addRow('pressure','Pressure','hPa');
+var e_power=addRow('power_mw','Solar power','mW');
+var e_audio=addRow('audio_rms_db','Audio RMS','dBFS');
+var e_uptime=addRow('uptime','Since last boot','');
+var e_reading=addRow('frame','Sensor reading','');
+var e_ts=addRow('timestamp','Timestamp','UTC');
+
 function connect(){
   var ws=new WebSocket('ws://'+location.hostname+':81/');
   ws.onopen=function(){status.innerHTML='<span class="dot"></span>live';};
   ws.onmessage=function(e){
     var d=JSON.parse(e.data);
-    if(d.error){status.textContent=d.error;return;}
-    F.forEach(function(f){if(els[f[0]]&&d[f[0]]!==undefined)els[f[0]].textContent=f[2](d[f[0]]);});
-    var ts=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'';
-    status.innerHTML='<span class="dot"></span>'+ts+' UTC';
+    if(d.error){status.innerHTML='<span class="dot err"></span>'+d.error;return;}
+    e_tempC.textContent=d.temp_c.toFixed(2);
+    e_tempF.textContent=(d.temp_c*9/5+32).toFixed(2);
+    e_hum.textContent=d.humidity.toFixed(2);
+    e_pres.textContent=d.pressure_hpa.toFixed(2);
+    e_power.textContent=d.power_mw.toFixed(0);
+    e_audio.textContent=d.audio_rms_db.toFixed(1);
+    e_uptime.textContent=fmt_uptime(d.uptime_ms);
+    e_reading.textContent='#'+d.frame+' (every 5s)';
+    e_ts.textContent=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'—';
+    status.innerHTML='<span class="dot"></span>live &mdash; updates every 500ms';
   };
   ws.onclose=function(){status.innerHTML='<span class="dot err"></span>reconnecting...';setTimeout(connect,2000);};
   ws.onerror=function(){ws.close();};
