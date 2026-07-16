@@ -30,6 +30,7 @@ bool SensorManager::begin() {
 
   Serial.println("Initializing I2C...");
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000);
   Wire.setTimeOut(50);
   scanI2C();
 
@@ -67,16 +68,9 @@ SensorFrame SensorManager::read() {
   frame.frameId = ++frameId;
   frame.timestampMs = millis();
 
-  unsigned long t0 = millis();
   frame.power = ina.read();
-  unsigned long t1 = millis();
   frame.climate = bme.read();
-  unsigned long t2 = millis();
   mic.read(frame.audio);
-  unsigned long t3 = millis();
-
-  Serial.printf("sensor timing — ina:%lums bme:%lums mic:%lums\n",
-    t1 - t0, t2 - t1, t3 - t2);
 
   return frame;
 }

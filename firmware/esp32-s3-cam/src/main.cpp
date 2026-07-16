@@ -8,6 +8,18 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 
+#ifndef FW_GIT_SHA
+#define FW_GIT_SHA "unknown"
+#endif
+
+#ifndef FW_GIT_DIRTY
+#define FW_GIT_DIRTY 1
+#endif
+
+#ifndef FW_BUILD_UTC
+#define FW_BUILD_UTC "unknown"
+#endif
+
 const char* WIFI_SSID      = "Knight-MacDonald_EXT";  // 2.4GHz extender, closer to device
 const char* WIFI_SSID_FB   = "Knight-MacDonald";      // fallback
 const char* WIFI_PASSWORD  = "409Jasper!";
@@ -21,14 +33,20 @@ static SensorFrame latestFrame;
 static bool hasFrame = false;
 
 volatile bool otaInProgress = false;
+volatile uint32_t sensorIntervalMs = 10;
 
 // --- helpers ---
 
 static String isoTime() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 10)) return "";
-  char buf[25];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  gmtime_r(&tv.tv_sec, &timeinfo);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+    (long)(tv.tv_usec / 1000));
   return String(buf);
 }
 
@@ -49,6 +67,9 @@ static String makeStatusJson(bool* okOut = nullptr) {
   if (!ok) return "{\"error\":\"no frame yet\"}";
 
   String json = "{";
+  json += "\"firmware_git_sha\":\"" FW_GIT_SHA "\",";
+  json += "\"firmware_git_dirty\":" + String(FW_GIT_DIRTY ? "true" : "false") + ",";
+  json += "\"firmware_build_utc\":\"" FW_BUILD_UTC "\",";
   json += "\"frame\":" + String(frame.frameId) + ",";
   json += "\"uptime_ms\":" + String(millis()) + ",";
   json += "\"timestamp\":\"" + isoTime() + "\",";
@@ -102,11 +123,10 @@ void setupOTA() {
 // --- sensor task ---
 
 static void sensorTask(void*) {
-  const TickType_t interval = pdMS_TO_TICKS(500);
   TickType_t lastWake = xTaskGetTickCount();
 
   while (true) {
-    vTaskDelayUntil(&lastWake, interval);
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(sensorIntervalMs));
 
     if (otaInProgress) continue;
 
@@ -134,6 +154,19 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       Serial.printf("[WS] client %u disconnected\n", num);
       break;
 
+    case WStype_TEXT: {
+      String msg = String((char*)payload, length);
+      int idx = msg.indexOf("\"rate_ms\":");
+      if (idx >= 0) {
+        uint32_t ms = (uint32_t)msg.substring(idx + 10).toInt();
+        if (ms >= 10 && ms <= 10000) {
+          sensorIntervalMs = ms;
+          Serial.printf("[WS] sensor rate set to %u ms\n", ms);
+        }
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -148,6 +181,8 @@ void setup() {
   Serial.println();
   Serial.println("=================================");
   Serial.println(" Electric Sky Firmware");
+  Serial.printf(" Git: %s%s  Built: %s\n", FW_GIT_SHA,
+    FW_GIT_DIRTY ? "-dirty" : "", FW_BUILD_UTC);
   Serial.println("=================================");
 
   if (!sensors.begin()) {
@@ -215,6 +250,7 @@ h1{color:#adf;margin:0 0 1.5rem;font-size:1.4rem;letter-spacing:.05em}
 #statusEl{font-size:.8rem;color:#aaa;margin-top:1.2rem}
 .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f4;margin-right:.4rem;vertical-align:middle}
 .dot.err{background:#f44}
+input[type=range]{accent-color:#4f4;width:160px;vertical-align:middle;cursor:pointer}
 </style>
 </head>
 <body>
@@ -228,7 +264,7 @@ function fmt_uptime(ms){
 }
 var rows=document.getElementById('rows');
 var statusEl=document.getElementById('statusEl');
-var computed={};
+var ws=null;
 
 function addRow(id,label,unit){
   var d=document.createElement('div');
@@ -242,14 +278,37 @@ var e_tempC=addRow('temp_c','Temperature','°C');
 var e_tempF=addRow('temp_f','Temperature','°F');
 var e_hum=addRow('humidity','Humidity','%');
 var e_pres=addRow('pressure','Pressure','hPa');
-var e_power=addRow('power_mw','Solar power','mW');
+var e_power=addRow('power_w','Solar power','W');
 var e_audio=addRow('audio_rms_db','Audio RMS','dBFS');
 var e_uptime=addRow('uptime','Since last boot','');
-var e_reading=addRow('frame','Sensor reading','');
+var e_reading=addRow('frame','Frame','');
 var e_ts=addRow('timestamp','Timestamp','UTC');
 
+(function(){
+  var d=document.createElement('div');
+  d.className='row';
+  d.innerHTML='<span class="label">Sample rate</span><span><input type="range" id="rateSlider" min="0" max="100" step="1" value="0"><span class="value" style="font-size:.9rem;margin-left:.6rem" id="rateLabel">100 Hz</span></span>';
+  rows.appendChild(d);
+})();
+
+function sliderToMs(v){
+  return Math.round(Math.exp(Math.log(10)+v/100*Math.log(500)));
+}
+function msToLabel(ms){
+  var hz=1000/ms;
+  return hz>=10?hz.toFixed(0)+' Hz':hz.toFixed(1)+' Hz';
+}
+
+var rateSlider=document.getElementById('rateSlider');
+var rateLabel=document.getElementById('rateLabel');
+rateSlider.oninput=function(){
+  var ms=sliderToMs(+this.value);
+  rateLabel.textContent=msToLabel(ms);
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({rate_ms:ms}));
+};
+
 function connect(){
-  var ws=new WebSocket('ws://{{IP}}:81/');
+  ws=new WebSocket('ws://{{IP}}:81/');
   ws.onopen=function(){statusEl.innerHTML='<span class="dot"></span>live';};
   ws.onmessage=function(e){
     var d=JSON.parse(e.data);
@@ -258,10 +317,10 @@ function connect(){
     e_tempF.textContent=(d.temp_c*9/5+32).toFixed(4);
     e_hum.textContent=d.humidity.toFixed(4);
     e_pres.textContent=d.pressure_hpa.toFixed(4);
-    e_power.textContent=d.power_mw.toFixed(0);
-    e_audio.textContent=d.audio_rms_db.toFixed(1);
+    e_power.textContent=(d.power_mw/1000).toFixed(4);
+    e_audio.textContent=d.audio_rms_db.toFixed(2);
     e_uptime.textContent=fmt_uptime(d.uptime_ms);
-    e_reading.textContent='#'+d.frame+' (every 5s)';
+    e_reading.textContent='#'+d.frame;
     e_ts.textContent=d.timestamp?d.timestamp.replace('T',' ').replace('Z',''):'—';
     statusEl.innerHTML='<span class="dot"></span>live';
   };
@@ -316,7 +375,7 @@ void loop() {
   webSocket.loop();
 
   static unsigned long lastWsBroadcast = 0;
-  const unsigned long WS_BROADCAST_MS = 250;
+  const unsigned long WS_BROADCAST_MS = 50;
 
   if (millis() - lastWsBroadcast >= WS_BROADCAST_MS) {
     lastWsBroadcast = millis();

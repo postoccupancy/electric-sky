@@ -21,7 +21,7 @@ public:
     int wsPin = 1,
     int sdPin = 21,
     int sampleRate = 16000,
-    int frameSize = 512
+    int frameSize = 64
   );
 
   bool begin();

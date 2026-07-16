@@ -46,7 +46,7 @@ bool INMP441::begin() {
 bool INMP441::read(AudioObservables& out) {
   uint32_t start = millis();
 
-  int32_t samples[512];
+  int32_t samples[64];
   size_t bytesRead = 0;
 
   // Drain any stale frames backed up in the DMA ring buffer so the
