@@ -30,10 +30,11 @@ constexpr uint32_t BME_INTERVAL_MS = 10;
 constexpr uint32_t POWER_INTERVAL_MS = 1;
 constexpr uint32_t TRANSPORT_INTERVAL_MS = 50;
 constexpr size_t MAX_BME_PER_PACKET = 8;
-constexpr size_t MAX_POWER_PER_PACKET = 64;
+constexpr size_t MAX_POWER_PER_PACKET = 63;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
 constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
-constexpr size_t TRANSPORT_QUEUE_DEPTH = 48;
+constexpr size_t TRANSPORT_QUEUE_DEPTH = 120;
+constexpr uint16_t INA219_CONVERSION_US = 1064;
 
 struct BmeSample {
   uint32_t sequence;
@@ -81,6 +82,10 @@ struct PacketHeader {
   uint32_t transportDrops;
   uint16_t scheduledHzX10;
   uint32_t uptimeMs;
+  uint16_t powerIntervalAvgUs;
+  uint16_t powerIntervalMaxUs;
+  uint16_t powerDuplicatePermille;
+  uint16_t powerConversionUs;
 } __attribute__((packed));
 
 struct TransportPacket {
@@ -91,7 +96,7 @@ struct TransportPacket {
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
-static_assert(sizeof(PacketHeader) == 64, "packet header changed");
+static_assert(sizeof(PacketHeader) == 72, "packet header changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
   MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
   <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
@@ -113,6 +118,10 @@ volatile uint32_t audioProduced = 0;
 volatile float bmeActualHz = 0;
 volatile float powerActualHz = 0;
 volatile float audioActualHz = 0;
+volatile uint32_t powerDuplicates = 0;
+volatile uint32_t powerIntervalMaxUs = 0;
+volatile uint16_t powerIntervalAvgUs = 0;
+volatile uint16_t powerDuplicatePermille = 0;
 
 static SemaphoreHandle_t latestMutex;
 static QueueHandle_t transportQueue;
@@ -211,12 +220,27 @@ static void bmeTask(void*) {
 static void powerTask(void*) {
   TickType_t lastWake = xTaskGetTickCount();
   uint32_t sequence = 0;
+  uint64_t previousTimeUs = 0;
+  INA219Reading previousReading = {};
+  bool havePrevious = false;
   while (true) {
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(POWER_INTERVAL_MS));
     if (otaInProgress) continue;
     INA219Reading reading = sensors.readPower();
     if (!reading.ok) continue;
-    PowerSample sample = {++sequence, nowUs(), reading.busVoltageV, reading.currentMa, reading.powerMw};
+    uint64_t sampleTimeUs = nowUs();
+    if (previousTimeUs) {
+      uint32_t interval = static_cast<uint32_t>(sampleTimeUs - previousTimeUs);
+      if (interval > powerIntervalMaxUs) powerIntervalMaxUs = interval;
+    }
+    if (havePrevious && reading.busVoltageV == previousReading.busVoltageV &&
+        reading.currentMa == previousReading.currentMa && reading.powerMw == previousReading.powerMw) {
+      powerDuplicates++;
+    }
+    previousTimeUs = sampleTimeUs;
+    previousReading = reading;
+    havePrevious = true;
+    PowerSample sample = {++sequence, sampleTimeUs, reading.busVoltageV, reading.currentMa, reading.powerMw};
     powerRing.push(sample);
     powerProduced++;
     xSemaphoreTake(latestMutex, portMAX_DELAY);
@@ -252,19 +276,25 @@ static void audioTask(void*) {
 }
 
 static void rateTask(void*) {
-  uint32_t lastBme = 0, lastPower = 0, lastAudio = 0;
+  uint32_t lastBme = 0, lastPower = 0, lastAudio = 0, lastPowerDuplicates = 0;
   uint64_t previous = nowUs();
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     uint64_t current = nowUs();
     float seconds = (current - previous) / 1000000.0f;
     uint32_t b = bmeProduced, p = powerProduced, a = audioProduced;
+    uint32_t duplicates = powerDuplicates;
+    uint32_t powerSamples = p - lastPower;
     bmeActualHz = (b - lastBme) / seconds;
     powerActualHz = (p - lastPower) / seconds;
     audioActualHz = (a - lastAudio) / seconds;
+    powerIntervalAvgUs = powerSamples ? static_cast<uint16_t>(seconds * 1000000.0f / powerSamples) : 0;
+    powerDuplicatePermille = powerSamples ? static_cast<uint16_t>(
+      (duplicates - lastPowerDuplicates) * 1000UL / powerSamples) : 0;
     lastBme = b;
     lastPower = p;
     lastAudio = a;
+    lastPowerDuplicates = duplicates;
     previous = current;
   }
 }
@@ -292,6 +322,8 @@ static void setupOTA() {
 
 static bool buildBatch(TransportPacket& packet) {
   static uint32_t packetSequence = 0;
+  uint32_t maxPowerIntervalUs = powerIntervalMaxUs;
+  powerIntervalMaxUs = 0;
   BmeSample bme[MAX_BME_PER_PACKET];
   PowerSample power[MAX_POWER_PER_PACKET];
   AudioSample audio[MAX_AUDIO_PER_PACKET];
@@ -310,7 +342,9 @@ static bool buildBatch(TransportPacket& packet) {
     static_cast<uint16_t>(audioActualHz * 10), static_cast<uint16_t>(bmeRing.size()),
     static_cast<uint16_t>(powerRing.size()), static_cast<uint16_t>(audioRing.size()),
     static_cast<uint16_t>(uxQueueMessagesWaiting(transportQueue)), transportDrops,
-    static_cast<uint16_t>(10000 / TRANSPORT_INTERVAL_MS), millis()
+    static_cast<uint16_t>(10000 / TRANSPORT_INTERVAL_MS), millis(), powerIntervalAvgUs,
+    static_cast<uint16_t>(maxPowerIntervalUs > UINT16_MAX ? UINT16_MAX : maxPowerIntervalUs),
+    powerDuplicatePermille, INA219_CONVERSION_US
   };
 
   size_t offset = 0;
