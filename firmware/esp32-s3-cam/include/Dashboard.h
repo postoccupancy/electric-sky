@@ -39,10 +39,12 @@ class Ring {
   constructor(capacity){this.a=new Array(capacity);this.capacity=capacity;this.head=0;this.count=0;this.lastSeq=null;this.gaps=0}
   push(s){if(this.lastSeq!==null&&s.seq!==this.lastSeq+1)this.gaps+=Math.max(0,s.seq-this.lastSeq-1);this.lastSeq=s.seq;this.a[this.head]=s;this.head=(this.head+1)%this.capacity;this.count=Math.min(this.count+1,this.capacity)}
   latest(){return this.count?this.a[(this.head-1+this.capacity)%this.capacity]:null}
-  visitSince(time,fn){const start=(this.head-this.count+this.capacity)%this.capacity;for(let i=0;i<this.count;i++){const s=this.a[(start+i)%this.capacity];if(s.t>=time)fn(s)}}
+  visitRange(startTime,endTime,fn){const start=(this.head-this.count+this.capacity)%this.capacity;for(let i=0;i<this.count;i++){const s=this.a[(start+i)%this.capacity];if(s.t>=startTime&&s.t<=endTime)fn(s)}}
 }
 const rings={temp:new Ring(1400),humidity:new Ring(1400),pressure:new Ring(1400),power:new Ring(14000),audio:new Ring(3500)};
 let ws,packetLast=null,packetGaps=0,packetCount=0,lastArrival=0,intervalEma=20,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0;
+let viewEnd=null;
+const PLAYBACK_DELAY_US=250000,WINDOW_US=10000000;
 const connection=document.getElementById('connection');
 function u64(d,o){return Number(d.getBigUint64(o,true))}
 function parsePacket(buffer){
@@ -61,16 +63,17 @@ function connect(){
   ws.onclose=()=>{connection.textContent='● reconnecting';connection.className='err';setTimeout(connect,1000)};
   ws.onerror=()=>ws.close();
 }
-function draw(name,color,unit,decimals){
+function newestTime(){let t=0;for(const ring of Object.values(rings)){const s=ring.latest();if(s&&s.t>t)t=s.t}return t}
+function draw(name,color,unit,decimals,end){
   const canvas=document.getElementById(name),rect=canvas.getBoundingClientRect(),scale=devicePixelRatio||1,w=Math.max(1,Math.floor(rect.width*scale)),h=Math.max(1,Math.floor(rect.height*scale));
   if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}const c=canvas.getContext('2d');c.clearRect(0,0,w,h);
-  const ring=rings[name],latest=ring.latest();if(!latest)return;const end=latest.t,start=end-10000000;
-  let lo=Infinity,hi=-Infinity;ring.visitSince(start,s=>{if(s.v<lo)lo=s.v;if(s.v>hi)hi=s.v});let range=hi-lo;if(range<1e-9)range=1;lo-=range*.12;hi+=range*.12;
+  const ring=rings[name],latest=ring.latest();if(!latest||end===null)return;const start=end-WINDOW_US,bins=Math.max(1,Math.ceil(w/2));if(!canvas._mins||canvas._mins.length!==bins){canvas._mins=new Float32Array(bins);canvas._maxs=new Float32Array(bins)}const mins=canvas._mins,maxs=canvas._maxs;mins.fill(Infinity);maxs.fill(-Infinity);
+  let lo=Infinity,hi=-Infinity;ring.visitRange(start,end,s=>{if(s.v<lo)lo=s.v;if(s.v>hi)hi=s.v;const b=Math.min(bins-1,Math.max(0,Math.floor((s.t-start)/WINDOW_US*bins)));if(s.v<mins[b])mins[b]=s.v;if(s.v>maxs[b])maxs[b]=s.v});if(lo===Infinity)return;let range=hi-lo;if(range<1e-9)range=1;lo-=range*.12;hi+=range*.12;
   c.strokeStyle='#1b252d';c.lineWidth=scale;c.beginPath();for(let i=1;i<4;i++){const y=h*i/4;c.moveTo(0,y);c.lineTo(w,y)}c.stroke();
-  c.strokeStyle=color;c.lineWidth=1.25*scale;c.beginPath();let first=true;ring.visitSince(start,s=>{const x=(s.t-start)/10000000*w,y=h-(s.v-lo)/(hi-lo)*h;if(first){c.moveTo(x,y);first=false}else c.lineTo(x,y)});c.stroke();
+  c.strokeStyle=color;c.lineWidth=1.25*scale;c.beginPath();let first=true;for(let b=0;b<bins;b++){if(mins[b]===Infinity)continue;const x=(b+.5)/bins*w,y1=h-(mins[b]-lo)/(hi-lo)*h,y2=h-(maxs[b]-lo)/(hi-lo)*h;if(first){c.moveTo(x,y1);first=false}else c.lineTo(x,y1);if(y2!==y1)c.lineTo(x,y2)}c.stroke();
   document.getElementById(name+'Value').textContent=latest.v.toFixed(decimals)+' '+unit;
 }
-function render(now){if(lastFrame){const dt=now-lastFrame;if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}lastFrame=now;draw('temp','#66ddff','°C',4);draw('humidity','#75ee99','%',4);draw('pressure','#dd99ff','hPa',4);draw('power','#ffcc66','W',4);draw('audio','#ff6688','dBFS',2);requestAnimationFrame(render)}
+function render(now){const newest=newestTime();if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;if(lastFrame){const dt=now-lastFrame;if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt;if(viewEnd!==null){viewEnd+=dt*1000;const target=newest-PLAYBACK_DELAY_US;if(viewEnd>target)viewEnd=target;else if(target-viewEnd>PLAYBACK_DELAY_US)viewEnd+=Math.min(dt*100,target-viewEnd-PLAYBACK_DELAY_US)}}lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd);draw('humidity','#75ee99','%',4,viewEnd);draw('pressure','#dd99ff','hPa',4,viewEnd);draw('power','#ffcc66','W',4,viewEnd);draw('audio','#ff6688','dBFS',2,viewEnd);requestAnimationFrame(render)}
 let prevPackets=0,prevBytes=0;
 setInterval(async()=>{
   try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json());
