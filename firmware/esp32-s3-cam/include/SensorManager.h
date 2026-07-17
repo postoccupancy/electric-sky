@@ -6,19 +6,12 @@
 #include "BME280.h"
 #include "INMP441.h"
 
-struct SensorFrame {
-  uint32_t frameId;
-  uint32_t timestampMs;
-
-  INA219Reading power;
-  BME280Reading climate;
-  AudioObservables audio;
-};
-
 class SensorManager {
 public:
   bool begin();
-  SensorFrame read();
+  INA219Reading readPower();
+  BME280Reading readClimate();
+  bool readAudio(AudioObservables& output);
   void stopForOTA();
 
 private:
@@ -28,7 +21,7 @@ private:
   BME280 bme;
   INMP441 mic;
 
-  uint32_t frameId = 0;
+  SemaphoreHandle_t _i2cMutex = nullptr;
 
   void scanI2C();
 };

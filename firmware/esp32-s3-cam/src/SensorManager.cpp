@@ -32,6 +32,8 @@ bool SensorManager::begin() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
   Wire.setTimeOut(50);
+  _i2cMutex = xSemaphoreCreateMutex();
+  if (!_i2cMutex) return false;
   scanI2C();
 
   Serial.println("Initializing INA219...");
@@ -62,15 +64,20 @@ void SensorManager::stopForOTA() {
   i2s_driver_uninstall(I2S_NUM_0);
 }
 
-SensorFrame SensorManager::read() {
-  SensorFrame frame;
+INA219Reading SensorManager::readPower() {
+  xSemaphoreTake(_i2cMutex, portMAX_DELAY);
+  INA219Reading reading = ina.read();
+  xSemaphoreGive(_i2cMutex);
+  return reading;
+}
 
-  frame.frameId = ++frameId;
-  frame.timestampMs = millis();
+BME280Reading SensorManager::readClimate() {
+  xSemaphoreTake(_i2cMutex, portMAX_DELAY);
+  BME280Reading reading = bme.read();
+  xSemaphoreGive(_i2cMutex);
+  return reading;
+}
 
-  frame.power = ina.read();
-  frame.climate = bme.read();
-  mic.read(frame.audio);
-
-  return frame;
+bool SensorManager::readAudio(AudioObservables& output) {
+  return mic.read(output);
 }
