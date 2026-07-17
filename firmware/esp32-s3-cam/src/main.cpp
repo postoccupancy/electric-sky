@@ -303,11 +303,6 @@ void setup() {
     while (true) delay(1000);
   }
 
-  xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1);
-  xTaskCreatePinnedToCore(bmeTask, "bme", 4096, nullptr, 2, nullptr, 1);
-  xTaskCreatePinnedToCore(powerTask, "power", 4096, nullptr, 1, nullptr, 1);
-  xTaskCreatePinnedToCore(rateTask, "rates", 3072, nullptr, 1, nullptr, 1);
-
   auto tryConnect = [](const char* ssid, const char* password, int attempts) {
     WiFi.begin(ssid, password);
     for (int i = 0; i < attempts && WiFi.status() != WL_CONNECTED; i++) delay(500);
@@ -356,6 +351,13 @@ void setup() {
 
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
+
+  // Start acquisition only after transport is ready so setup delays cannot
+  // fill the rings and create artificial sequence gaps at boot.
+  xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(bmeTask, "bme", 4096, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(powerTask, "power", 4096, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(rateTask, "rates", 3072, nullptr, 1, nullptr, 1);
   Serial.println("Dashboard: http://electric-sky.local/");
 }
 
