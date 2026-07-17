@@ -27,7 +27,7 @@ const char* WIFI_PASSWORD = "409Jasper!";
 
 constexpr uint32_t BME_INTERVAL_MS = 10;
 constexpr uint32_t POWER_INTERVAL_MS = 1;
-constexpr uint32_t TRANSPORT_INTERVAL_MS = 20;
+constexpr uint32_t TRANSPORT_INTERVAL_MS = 25;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 64;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
