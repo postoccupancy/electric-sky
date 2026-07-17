@@ -27,7 +27,7 @@ const char* WIFI_PASSWORD = "409Jasper!";
 
 constexpr uint32_t BME_INTERVAL_MS = 10;
 constexpr uint32_t POWER_INTERVAL_MS = 1;
-constexpr uint32_t TRANSPORT_INTERVAL_MS = 34;
+constexpr uint32_t TRANSPORT_INTERVAL_MS = 50;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 64;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
@@ -78,6 +78,8 @@ struct PacketHeader {
   uint16_t audioQueue;
   uint16_t transportQueued;
   uint32_t transportDrops;
+  uint16_t scheduledHzX10;
+  uint32_t uptimeMs;
 } __attribute__((packed));
 
 struct TransportPacket {
@@ -88,7 +90,7 @@ struct TransportPacket {
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
-static_assert(sizeof(PacketHeader) == 58, "packet header changed");
+static_assert(sizeof(PacketHeader) == 64, "packet header changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
   MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
   <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
@@ -303,7 +305,8 @@ static bool buildBatch(TransportPacket& packet) {
     static_cast<uint16_t>(bmeActualHz * 10), static_cast<uint16_t>(powerActualHz * 10),
     static_cast<uint16_t>(audioActualHz * 10), static_cast<uint16_t>(bmeRing.size()),
     static_cast<uint16_t>(powerRing.size()), static_cast<uint16_t>(audioRing.size()),
-    static_cast<uint16_t>(uxQueueMessagesWaiting(transportQueue)), transportDrops
+    static_cast<uint16_t>(uxQueueMessagesWaiting(transportQueue)), transportDrops,
+    static_cast<uint16_t>(10000 / TRANSPORT_INTERVAL_MS), millis()
   };
 
   size_t offset = 0;

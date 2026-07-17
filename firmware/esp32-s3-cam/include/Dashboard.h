@@ -36,24 +36,24 @@ canvas{display:block;width:100%;height:170px;background:#07090c}
 </main>
 <script>
 class Ring {
-  constructor(capacity){this.a=new Array(capacity);this.capacity=capacity;this.head=0;this.count=0;this.lastSeq=null;this.gaps=0}
-  push(s){if(this.lastSeq!==null&&s.seq!==this.lastSeq+1)this.gaps+=Math.max(0,s.seq-this.lastSeq-1);this.lastSeq=s.seq;this.a[this.head]=s;this.head=(this.head+1)%this.capacity;this.count=Math.min(this.count+1,this.capacity)}
+  constructor(capacity,expectedUs){this.a=new Array(capacity);this.capacity=capacity;this.expectedUs=expectedUs;this.head=0;this.count=0;this.lastSeq=null;this.gaps=0;this.gapEvents=0;this.gapUs=0}
+  push(s){if(this.lastSeq!==null&&s.seq!==this.lastSeq+1){const missing=Math.max(0,s.seq-this.lastSeq-1);if(missing){this.gaps+=missing;this.gapEvents++;this.gapUs+=missing*this.expectedUs}}this.lastSeq=s.seq;this.a[this.head]=s;this.head=(this.head+1)%this.capacity;this.count=Math.min(this.count+1,this.capacity)}
   latest(){return this.count?this.a[(this.head-1+this.capacity)%this.capacity]:null}
   visitRange(startTime,endTime,fn){const start=(this.head-this.count+this.capacity)%this.capacity;for(let i=0;i<this.count;i++){const s=this.a[(start+i)%this.capacity];if(s.t>=startTime&&s.t<=endTime)fn(s)}}
 }
-const rings={temp:new Ring(1400),humidity:new Ring(1400),pressure:new Ring(1400),power:new Ring(14000),audio:new Ring(3500)};
-let ws,packetLast=null,packetGaps=0,packetCount=0,lastArrival=0,intervalEma=20,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0,displayUnderruns=0,inUnderrun=false;
-let transportQueued=0,transportDropped=0;
+const rings={temp:new Ring(1400,10000),humidity:new Ring(1400,10000),pressure:new Ring(1400,10000),power:new Ring(14000,1000),audio:new Ring(3500,4000)};
+let ws,packetLast=null,packetGaps=0,packetGapEvents=0,packetCount=0,lastArrival=0,intervalEma=50,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0,displayUnderruns=0,inUnderrun=false,underrunStarted=0,underrunMs=0,observationStarted=0,longestSilence=0;
+let transportQueued=0,transportDropped=0,scheduledHz=20,firmwareUptimeMs=0;
 let viewEnd=null;
 const PLAYBACK_DELAY_US=250000,WINDOW_US=10000000;
 const connection=document.getElementById('connection');
 function u64(d,o){return Number(d.getBigUint64(o,true))}
 function parsePacket(buffer){
-  const d=new DataView(buffer);if(d.byteLength<58||d.getUint8(0)!==69||d.getUint8(1)!==83||d.getUint8(2)!==75||d.getUint8(3)!==89)return;
-  const packetSeq=d.getUint32(8,true);if(packetLast!==null&&packetSeq!==packetLast+1)packetGaps+=Math.max(0,packetSeq-packetLast-1);packetLast=packetSeq;packetCount++;bytesReceived+=d.byteLength;
-  const now=performance.now();if(lastArrival){const delta=now-lastArrival;intervalEma=intervalEma*.95+delta*.05;jitterEma=jitterEma*.9+Math.abs(delta-intervalEma)*.1}lastArrival=now;
+  const d=new DataView(buffer);if(d.byteLength<64||d.getUint8(0)!==69||d.getUint8(1)!==83||d.getUint8(2)!==75||d.getUint8(3)!==89)return;
+  const packetSeq=d.getUint32(8,true);if(packetLast!==null&&packetSeq!==packetLast+1){const missing=Math.max(0,packetSeq-packetLast-1);if(missing){packetGaps+=missing;packetGapEvents++}}packetLast=packetSeq;packetCount++;bytesReceived+=d.byteLength;
+  const now=performance.now();if(!observationStarted)observationStarted=now;if(lastArrival){const delta=now-lastArrival;if(delta>longestSilence)longestSilence=delta;intervalEma=intervalEma*.95+delta*.05;jitterEma=jitterEma*.9+Math.abs(delta-intervalEma)*.1}lastArrival=now;
   bmeHz.textContent=(d.getUint16(40,true)/10).toFixed(1)+' Hz';powerHz.textContent=(d.getUint16(42,true)/10).toFixed(1)+' Hz';audioHz.textContent=(d.getUint16(44,true)/10).toFixed(1)+' Hz';
-  bmeDetail.textContent='queue '+d.getUint16(46,true)+' · overruns '+d.getUint32(28,true);powerDetail.textContent='queue '+d.getUint16(48,true)+' · overruns '+d.getUint32(32,true);audioDetail.textContent='queue '+d.getUint16(50,true)+' · overruns '+d.getUint32(36,true);transportQueued=d.getUint16(52,true);transportDropped=d.getUint32(54,true);
+  bmeDetail.textContent='queue '+d.getUint16(46,true)+' · overruns '+d.getUint32(28,true);powerDetail.textContent='queue '+d.getUint16(48,true)+' · overruns '+d.getUint32(32,true);audioDetail.textContent='queue '+d.getUint16(50,true)+' · overruns '+d.getUint32(36,true);transportQueued=d.getUint16(52,true);transportDropped=d.getUint32(54,true);scheduledHz=d.getUint16(58,true)/10;firmwareUptimeMs=d.getUint32(60,true);
   const nb=d.getUint16(20,true),np=d.getUint16(22,true),na=d.getUint16(24,true);let o=d.getUint16(6,true);
   for(let i=0;i<nb;i++,o+=24){const seq=d.getUint32(o,true),t=u64(d,o+4);rings.temp.push({seq,t,v:d.getFloat32(o+12,true)});rings.humidity.push({seq,t,v:d.getFloat32(o+16,true)});rings.pressure.push({seq,t,v:d.getFloat32(o+20,true)})}
   for(let i=0;i<np;i++,o+=24){const seq=d.getUint32(o,true),t=u64(d,o+4);rings.power.push({seq,t,v:d.getFloat32(o+20,true)/1000})}
@@ -76,12 +76,12 @@ function draw(name,color,unit,decimals,end,dt){
   c.strokeStyle=color;c.lineWidth=1.25*scale;c.beginPath();let previous=-2;for(let b=0;b<bins;b++){if(mins[b]===Infinity)continue;const x=(b+.5)/bins*w,y1=h-(mins[b]-lo)/(hi-lo)*h,y2=h-(maxs[b]-lo)/(hi-lo)*h;if(b!==previous+1)c.moveTo(x,y1);else c.lineTo(x,y1);if(y2!==y1)c.lineTo(x,y2);previous=b}c.stroke();
   document.getElementById(name+'Value').textContent=latest.v.toFixed(decimals)+' '+unit;
 }
-function render(now){const newest=newestTime(),dt=lastFrame?now-lastFrame:0;if(lastFrame){if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;else if(lastFrame&&viewEnd!==null)viewEnd+=dt*1000;const underrun=viewEnd!==null&&viewEnd>newest;if(underrun&&!inUnderrun)displayUnderruns++;inUnderrun=underrun;lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd,dt);draw('humidity','#75ee99','%',4,viewEnd,dt);draw('pressure','#dd99ff','hPa',4,viewEnd,dt);draw('power','#ffcc66','W',4,viewEnd,dt);draw('audio','#ff6688','dBFS',2,viewEnd,dt);requestAnimationFrame(render)}
+function render(now){const newest=newestTime(),dt=lastFrame?now-lastFrame:0;if(lastFrame){if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;else if(lastFrame&&viewEnd!==null)viewEnd+=dt*1000;const underrun=viewEnd!==null&&viewEnd>newest;if(underrun&&!inUnderrun){displayUnderruns++;underrunStarted=now}else if(!underrun&&inUnderrun){underrunMs+=now-underrunStarted;underrunStarted=0}inUnderrun=underrun;lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd,dt);draw('humidity','#75ee99','%',4,viewEnd,dt);draw('pressure','#dd99ff','hPa',4,viewEnd,dt);draw('power','#ffcc66','W',4,viewEnd,dt);draw('audio','#ff6688','dBFS',2,viewEnd,dt);requestAnimationFrame(render)}
 let prevPackets=0,prevBytes=0;
 setInterval(async()=>{
-  const dp=packetCount-prevPackets,db=bytesReceived-prevBytes;prevPackets=packetCount;prevBytes=bytesReceived;
-  packetHz.textContent=dp+' pkt/s';transportDetail.textContent=(db/1024).toFixed(1)+' KiB/s · packet gaps '+packetGaps+' · queue '+transportQueued+' · dropped '+transportDropped;
-  jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='sample loss B/P/A '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' · display underruns '+displayUnderruns+' · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
+  const now=performance.now(),dp=packetCount-prevPackets,db=bytesReceived-prevBytes,observedSec=Math.max(.001,(now-observationStarted)/1000),avg=packetCount/observedSec,currentSilence=lastArrival?now-lastArrival:0,totalUnderrun=underrunMs+(inUnderrun?now-underrunStarted:0),dropMin=firmwareUptimeMs?transportDropped/(firmwareUptimeMs/60000):0;prevPackets=packetCount;prevBytes=bytesReceived;
+  packetHz.textContent=dp+' pkt/s';transportDetail.textContent='scheduled '+scheduledHz.toFixed(1)+' · avg '+avg.toFixed(1)+' · '+(db/1024).toFixed(1)+' KiB/s · observed '+observedSec.toFixed(0)+'s · packet gaps '+packetGapEvents+'/'+packetGaps+' · queue '+transportQueued+' · dropped '+transportDropped+' ('+dropMin.toFixed(1)+'/min)';
+  jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='silence now/max '+currentSilence.toFixed(0)+'/'+longestSilence.toFixed(0)+'ms · sample gaps B/P/A events '+rings.temp.gapEvents+'/'+rings.power.gapEvents+'/'+rings.audio.gapEvents+' missing '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' duration '+(rings.temp.gapUs/1e6).toFixed(1)+'/'+(rings.power.gapUs/1e6).toFixed(1)+'/'+(rings.audio.gapUs/1e6).toFixed(1)+'s · underruns '+displayUnderruns+' for '+(totalUnderrun/1000).toFixed(1)+'s · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
 },1000);
 connect();requestAnimationFrame(render);
 </script>
