@@ -361,6 +361,11 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
+  // Network delivery and OTA must preempt acquisition briefly. Every loop
+  // iteration yields, so sensor tasks still run while packet timing remains
+  // regular under the continuous 1 kHz power and 250 Hz audio workloads.
+  vTaskPrioritySet(nullptr, 4);
+
   // Start acquisition only after transport is ready so setup delays cannot
   // fill the rings and create artificial sequence gaps at boot.
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1);
@@ -377,7 +382,9 @@ void loop() {
 
   static uint32_t lastTransport = 0;
   if (!otaInProgress && millis() - lastTransport >= TRANSPORT_INTERVAL_MS) {
-    lastTransport += TRANSPORT_INTERVAL_MS;
+    // Never replay missed network deadlines in a burst. Samples remain in
+    // their rings and are drained in subsequent regularly paced batches.
+    lastTransport = millis();
     sendBatch();
   }
 
