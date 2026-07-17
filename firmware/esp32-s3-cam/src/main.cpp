@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <time.h>
 
@@ -32,7 +33,7 @@ constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 64;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
 constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
-constexpr size_t TRANSPORT_QUEUE_DEPTH = 4;
+constexpr size_t TRANSPORT_QUEUE_DEPTH = 48;
 
 struct BmeSample {
   uint32_t sequence;
@@ -98,7 +99,7 @@ static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
 WebServer server(80);
 WebSocketsServer webSocket(81);
 SensorManager sensors;
-static volatile int8_t activeWebSocketClient = -1;
+static volatile uint8_t webSocketClients = 0;
 
 SampleRing<BmeSample, 256> bmeRing;
 SampleRing<PowerSample, 1024> powerRing;
@@ -115,6 +116,8 @@ volatile float audioActualHz = 0;
 
 static SemaphoreHandle_t latestMutex;
 static QueueHandle_t transportQueue;
+static StaticQueue_t transportQueueControl;
+static uint8_t* transportQueueStorage = nullptr;
 static volatile uint32_t transportDrops = 0;
 static BmeSample latestBme = {};
 static PowerSample latestPower = {};
@@ -340,14 +343,11 @@ static void transportTask(void*) {
 
 static void webSocketEvent(uint8_t number, WStype_t type, uint8_t*, size_t) {
   if (type == WStype_CONNECTED) {
-    if (activeWebSocketClient >= 0 && activeWebSocketClient != number) {
-      webSocket.disconnect(static_cast<uint8_t>(activeWebSocketClient));
-    }
-    activeWebSocketClient = number;
+    webSocketClients |= static_cast<uint8_t>(1U << number);
     Serial.printf("[WS] client %u connected\n", number);
   }
   if (type == WStype_DISCONNECTED) {
-    if (activeWebSocketClient == number) activeWebSocketClient = -1;
+    webSocketClients &= static_cast<uint8_t>(~(1U << number));
     Serial.printf("[WS] client %u disconnected\n", number);
   }
 }
@@ -361,7 +361,10 @@ void setup() {
   Serial.println("=================================");
 
   latestMutex = xSemaphoreCreateMutex();
-  transportQueue = xQueueCreate(TRANSPORT_QUEUE_DEPTH, sizeof(TransportPacket));
+  transportQueueStorage = static_cast<uint8_t*>(heap_caps_malloc(
+    TRANSPORT_QUEUE_DEPTH * sizeof(TransportPacket), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  transportQueue = transportQueueStorage ? xQueueCreateStatic(TRANSPORT_QUEUE_DEPTH,
+    sizeof(TransportPacket), transportQueueStorage, &transportQueueControl) : nullptr;
   if (!latestMutex || !transportQueue || !sensors.begin()) {
     Serial.println("Sensor initialization failed. Halting.");
     while (true) delay(1000);
@@ -439,11 +442,14 @@ void loop() {
 
   TransportPacket packet;
   if (!otaInProgress && xQueueReceive(transportQueue, &packet, 0) == pdTRUE) {
-    int8_t client = activeWebSocketClient;
-    if (client >= 0 && (!webSocket.clientIsConnected(client) ||
-        !webSocket.sendBIN(static_cast<uint8_t>(client), packet.data, packet.length))) {
-      webSocket.disconnect(static_cast<uint8_t>(client));
-      if (activeWebSocketClient == client) activeWebSocketClient = -1;
+    uint8_t clients = webSocketClients;
+    for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++) {
+      if (!(clients & (1U << client))) continue;
+      if (!webSocket.clientIsConnected(client) ||
+          !webSocket.sendBIN(client, packet.data, packet.length)) {
+        webSocket.disconnect(client);
+        webSocketClients &= static_cast<uint8_t>(~(1U << client));
+      }
     }
   }
 
