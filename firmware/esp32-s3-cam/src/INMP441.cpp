@@ -11,9 +11,11 @@ INMP441::INMP441(int sckPin, int wsPin, int sdPin, int sampleRate, int frameSize
     _sdPin(sdPin),
     _sampleRate(sampleRate),
     _frameSize(frameSize),
-    _frameId(0) {}
+    _frameId(0),
+    _running(false) {}
 
 bool INMP441::begin() {
+  if (_running) return true;
   i2s_config_t i2s_config = {};
   i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
   i2s_config.sample_rate = _sampleRate;
@@ -37,10 +39,20 @@ bool INMP441::begin() {
   if (err != ESP_OK) return false;
 
   err = i2s_set_pin(I2S_PORT, &pin_config);
-  if (err != ESP_OK) return false;
+  if (err != ESP_OK) {
+    i2s_driver_uninstall(I2S_PORT);
+    return false;
+  }
 
   i2s_zero_dma_buffer(I2S_PORT);
+  _running = true;
   return true;
+}
+
+void INMP441::end() {
+  if (!_running) return;
+  i2s_driver_uninstall(I2S_PORT);
+  _running = false;
 }
 
 bool INMP441::read(AudioObservables& out) {

@@ -12,6 +12,8 @@ public:
   INA219Reading readPower();
   BME280Reading readClimate();
   bool readAudio(AudioObservables& output);
+  void stopAudio();
+  bool startAudio();
 
 private:
   Camera camera;

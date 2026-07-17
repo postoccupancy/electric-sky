@@ -76,3 +76,11 @@ BME280Reading SensorManager::readClimate() {
 bool SensorManager::readAudio(AudioObservables& output) {
   return mic.read(output);
 }
+
+void SensorManager::stopAudio() {
+  mic.end();
+}
+
+bool SensorManager::startAudio() {
+  return mic.begin();
+}

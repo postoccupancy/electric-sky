@@ -84,6 +84,7 @@ SampleRing<PowerSample, 1024> powerRing;
 SampleRing<AudioSample, 512> audioRing;
 
 volatile bool otaInProgress = false;
+volatile bool otaAudioStopped = false;
 volatile uint32_t bmeProduced = 0;
 volatile uint32_t powerProduced = 0;
 volatile uint32_t audioProduced = 0;
@@ -201,7 +202,13 @@ static void audioTask(void*) {
   uint32_t sequence = 0;
   while (true) {
     if (otaInProgress) {
-      vTaskDelay(pdMS_TO_TICKS(10));
+      // This task owns I2S. Finish any active read, then stop the driver so
+      // OTA never tears it down concurrently and DMA is quiet during flash.
+      sensors.stopAudio();
+      otaAudioStopped = true;
+      while (otaInProgress) vTaskDelay(pdMS_TO_TICKS(10));
+      if (!sensors.startAudio()) Serial.println("Audio restart failed after OTA error");
+      otaAudioStopped = false;
       continue;
     }
     AudioObservables reading;
@@ -239,6 +246,9 @@ static void setupOTA() {
   ArduinoOTA.setPort(3232);
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
+    uint32_t started = millis();
+    while (!otaAudioStopped && millis() - started < 250) delay(1);
+    Serial.printf("Audio stopped for OTA: %s\n", otaAudioStopped ? "yes" : "timeout");
     Serial.println("OTA start");
   });
   ArduinoOTA.onEnd([]() { Serial.println("\nOTA end"); });

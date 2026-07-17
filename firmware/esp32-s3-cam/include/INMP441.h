@@ -25,6 +25,7 @@ public:
   );
 
   bool begin();
+  void end();
   bool read(AudioObservables& out);
 
 private:
@@ -34,4 +35,5 @@ private:
   int _sampleRate;
   int _frameSize;
   uint32_t _frameId;
+  bool _running;
 };
