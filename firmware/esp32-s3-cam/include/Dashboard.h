@@ -43,14 +43,17 @@ class Ring {
 }
 const rings={temp:new Ring(1400),humidity:new Ring(1400),pressure:new Ring(1400),power:new Ring(14000),audio:new Ring(3500)};
 let ws,packetLast=null,packetGaps=0,packetCount=0,lastArrival=0,intervalEma=20,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0,displayUnderruns=0,inUnderrun=false;
+let transportQueued=0,transportDropped=0;
 let viewEnd=null;
 const PLAYBACK_DELAY_US=250000,WINDOW_US=10000000;
 const connection=document.getElementById('connection');
 function u64(d,o){return Number(d.getBigUint64(o,true))}
 function parsePacket(buffer){
-  const d=new DataView(buffer);if(d.byteLength<40||d.getUint8(0)!==69||d.getUint8(1)!==83||d.getUint8(2)!==75||d.getUint8(3)!==89)return;
+  const d=new DataView(buffer);if(d.byteLength<58||d.getUint8(0)!==69||d.getUint8(1)!==83||d.getUint8(2)!==75||d.getUint8(3)!==89)return;
   const packetSeq=d.getUint32(8,true);if(packetLast!==null&&packetSeq!==packetLast+1)packetGaps+=Math.max(0,packetSeq-packetLast-1);packetLast=packetSeq;packetCount++;bytesReceived+=d.byteLength;
   const now=performance.now();if(lastArrival){const delta=now-lastArrival;intervalEma=intervalEma*.95+delta*.05;jitterEma=jitterEma*.9+Math.abs(delta-intervalEma)*.1}lastArrival=now;
+  bmeHz.textContent=(d.getUint16(40,true)/10).toFixed(1)+' Hz';powerHz.textContent=(d.getUint16(42,true)/10).toFixed(1)+' Hz';audioHz.textContent=(d.getUint16(44,true)/10).toFixed(1)+' Hz';
+  bmeDetail.textContent='queue '+d.getUint16(46,true)+' · overruns '+d.getUint32(28,true);powerDetail.textContent='queue '+d.getUint16(48,true)+' · overruns '+d.getUint32(32,true);audioDetail.textContent='queue '+d.getUint16(50,true)+' · overruns '+d.getUint32(36,true);transportQueued=d.getUint16(52,true);transportDropped=d.getUint32(54,true);
   const nb=d.getUint16(20,true),np=d.getUint16(22,true),na=d.getUint16(24,true);let o=d.getUint16(6,true);
   for(let i=0;i<nb;i++,o+=24){const seq=d.getUint32(o,true),t=u64(d,o+4);rings.temp.push({seq,t,v:d.getFloat32(o+12,true)});rings.humidity.push({seq,t,v:d.getFloat32(o+16,true)});rings.pressure.push({seq,t,v:d.getFloat32(o+20,true)})}
   for(let i=0;i<np;i++,o+=24){const seq=d.getUint32(o,true),t=u64(d,o+4);rings.power.push({seq,t,v:d.getFloat32(o+20,true)/1000})}
@@ -76,12 +79,8 @@ function draw(name,color,unit,decimals,end,dt){
 function render(now){const newest=newestTime(),dt=lastFrame?now-lastFrame:0;if(lastFrame){if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;else if(lastFrame&&viewEnd!==null)viewEnd+=dt*1000;const underrun=viewEnd!==null&&viewEnd>newest;if(underrun&&!inUnderrun)displayUnderruns++;inUnderrun=underrun;lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd,dt);draw('humidity','#75ee99','%',4,viewEnd,dt);draw('pressure','#dd99ff','hPa',4,viewEnd,dt);draw('power','#ffcc66','W',4,viewEnd,dt);draw('audio','#ff6688','dBFS',2,viewEnd,dt);requestAnimationFrame(render)}
 let prevPackets=0,prevBytes=0;
 setInterval(async()=>{
-  try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json());
-    bmeHz.textContent=s.bme_actual_hz.toFixed(1)+' Hz';powerHz.textContent=s.power_actual_hz.toFixed(1)+' Hz';audioHz.textContent=s.audio_actual_hz.toFixed(1)+' Hz';
-    bmeDetail.textContent='queue '+s.bme_queue+' · overruns '+s.bme_overruns;powerDetail.textContent='queue '+s.power_queue+' · overruns '+s.power_overruns;audioDetail.textContent='queue '+s.audio_queue+' · overruns '+s.audio_overruns;transportDetail.dataset.queue='queue '+s.transport_queue+' · dropped '+s.transport_drops;
-  }catch(e){}
   const dp=packetCount-prevPackets,db=bytesReceived-prevBytes;prevPackets=packetCount;prevBytes=bytesReceived;
-  packetHz.textContent=dp+' pkt/s';transportDetail.textContent=(db/1024).toFixed(1)+' KiB/s · packet gaps '+packetGaps+' · '+(transportDetail.dataset.queue||'');
+  packetHz.textContent=dp+' pkt/s';transportDetail.textContent=(db/1024).toFixed(1)+' KiB/s · packet gaps '+packetGaps+' · queue '+transportQueued+' · dropped '+transportDropped;
   jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='sample loss B/P/A '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' · display underruns '+displayUnderruns+' · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
 },1000);
 connect();requestAnimationFrame(render);

@@ -70,6 +70,14 @@ struct PacketHeader {
   uint32_t bmeOverruns;
   uint32_t powerOverruns;
   uint32_t audioOverruns;
+  uint16_t bmeHzX10;
+  uint16_t powerHzX10;
+  uint16_t audioHzX10;
+  uint16_t bmeQueue;
+  uint16_t powerQueue;
+  uint16_t audioQueue;
+  uint16_t transportQueued;
+  uint32_t transportDrops;
 } __attribute__((packed));
 
 struct TransportPacket {
@@ -80,7 +88,7 @@ struct TransportPacket {
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
-static_assert(sizeof(PacketHeader) == 40, "packet header changed");
+static_assert(sizeof(PacketHeader) == 58, "packet header changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
   MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
   <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
@@ -291,7 +299,11 @@ static bool buildBatch(TransportPacket& packet) {
     {'E', 'S', 'K', 'Y'}, 1, 0, sizeof(PacketHeader), ++packetSequence, nowUs(),
     static_cast<uint16_t>(bmeCount), static_cast<uint16_t>(powerCount),
     static_cast<uint16_t>(audioCount), 0,
-    bmeRing.overruns(), powerRing.overruns(), audioRing.overruns()
+    bmeRing.overruns(), powerRing.overruns(), audioRing.overruns(),
+    static_cast<uint16_t>(bmeActualHz * 10), static_cast<uint16_t>(powerActualHz * 10),
+    static_cast<uint16_t>(audioActualHz * 10), static_cast<uint16_t>(bmeRing.size()),
+    static_cast<uint16_t>(powerRing.size()), static_cast<uint16_t>(audioRing.size()),
+    static_cast<uint16_t>(uxQueueMessagesWaiting(transportQueue)), transportDrops
   };
 
   size_t offset = 0;
