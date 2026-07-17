@@ -27,8 +27,7 @@ const char* WIFI_SSID_FB = "Knight-MacDonald";
 const char* WIFI_PASSWORD = "409Jasper!";
 
 constexpr uint32_t BME_INTERVAL_MS = 10;
-constexpr uint32_t POWER_INTERVAL_MS = 1;
-constexpr uint32_t TRANSPORT_INTERVAL_MS = 50;
+constexpr uint32_t TRANSPORT_INTERVAL_MS = 63;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 63;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
@@ -218,14 +217,28 @@ static void bmeTask(void*) {
 }
 
 static void powerTask(void*) {
-  TickType_t lastWake = xTaskGetTickCount();
   uint32_t sequence = 0;
   uint64_t previousTimeUs = 0;
+  uint64_t nextSampleUs = nowUs();
   INA219Reading previousReading = {};
   bool havePrevious = false;
   while (true) {
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(POWER_INTERVAL_MS));
-    if (otaInProgress) continue;
+    if (otaInProgress) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      nextSampleUs = nowUs();
+      continue;
+    }
+    uint64_t currentUs = nowUs();
+    if (currentUs < nextSampleUs) {
+      uint32_t waitUs = static_cast<uint32_t>(nextSampleUs - currentUs);
+      if (waitUs >= 1000) vTaskDelay(pdMS_TO_TICKS(waitUs / 1000));
+      currentUs = nowUs();
+      if (currentUs < nextSampleUs) delayMicroseconds(nextSampleUs - currentUs);
+    } else if (currentUs - nextSampleUs > INA219_CONVERSION_US) {
+      // Do not replay missed acquisition deadlines in a catch-up burst.
+      nextSampleUs = currentUs;
+    }
+    nextSampleUs += INA219_CONVERSION_US;
     INA219Reading reading = sensors.readPower();
     if (!reading.ok) continue;
     uint64_t sampleTimeUs = nowUs();
