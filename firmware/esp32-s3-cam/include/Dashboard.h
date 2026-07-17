@@ -42,7 +42,7 @@ class Ring {
   visitRange(startTime,endTime,fn){const start=(this.head-this.count+this.capacity)%this.capacity;for(let i=0;i<this.count;i++){const s=this.a[(start+i)%this.capacity];if(s.t>=startTime&&s.t<=endTime)fn(s)}}
 }
 const rings={temp:new Ring(1400),humidity:new Ring(1400),pressure:new Ring(1400),power:new Ring(14000),audio:new Ring(3500)};
-let ws,packetLast=null,packetGaps=0,packetCount=0,lastArrival=0,intervalEma=20,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0;
+let ws,packetLast=null,packetGaps=0,packetCount=0,lastArrival=0,intervalEma=20,jitterEma=0,bytesReceived=0,renderStalls=0,worstFrame=0,lastFrame=0,displayUnderruns=0,inUnderrun=false;
 let viewEnd=null;
 const PLAYBACK_DELAY_US=250000,WINDOW_US=10000000;
 const connection=document.getElementById('connection');
@@ -73,16 +73,16 @@ function draw(name,color,unit,decimals,end,dt){
   c.strokeStyle=color;c.lineWidth=1.25*scale;c.beginPath();let previous=-2;for(let b=0;b<bins;b++){if(mins[b]===Infinity)continue;const x=(b+.5)/bins*w,y1=h-(mins[b]-lo)/(hi-lo)*h,y2=h-(maxs[b]-lo)/(hi-lo)*h;if(b!==previous+1)c.moveTo(x,y1);else c.lineTo(x,y1);if(y2!==y1)c.lineTo(x,y2);previous=b}c.stroke();
   document.getElementById(name+'Value').textContent=latest.v.toFixed(decimals)+' '+unit;
 }
-function render(now){const newest=newestTime(),dt=lastFrame?now-lastFrame:0;if(lastFrame){if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;if(lastFrame&&viewEnd!==null){viewEnd+=dt*1000;const target=newest-PLAYBACK_DELAY_US;if(viewEnd>target)viewEnd=target;else if(target-viewEnd>PLAYBACK_DELAY_US)viewEnd+=Math.min(dt*100,target-viewEnd-PLAYBACK_DELAY_US)}lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd,dt);draw('humidity','#75ee99','%',4,viewEnd,dt);draw('pressure','#dd99ff','hPa',4,viewEnd,dt);draw('power','#ffcc66','W',4,viewEnd,dt);draw('audio','#ff6688','dBFS',2,viewEnd,dt);requestAnimationFrame(render)}
+function render(now){const newest=newestTime(),dt=lastFrame?now-lastFrame:0;if(lastFrame){if(dt>40)renderStalls++;if(dt>worstFrame)worstFrame=dt}if(viewEnd===null&&newest)viewEnd=newest-PLAYBACK_DELAY_US;else if(lastFrame&&viewEnd!==null)viewEnd+=dt*1000;const underrun=viewEnd!==null&&viewEnd>newest;if(underrun&&!inUnderrun)displayUnderruns++;inUnderrun=underrun;lastFrame=now;draw('temp','#66ddff','°C',4,viewEnd,dt);draw('humidity','#75ee99','%',4,viewEnd,dt);draw('pressure','#dd99ff','hPa',4,viewEnd,dt);draw('power','#ffcc66','W',4,viewEnd,dt);draw('audio','#ff6688','dBFS',2,viewEnd,dt);requestAnimationFrame(render)}
 let prevPackets=0,prevBytes=0;
 setInterval(async()=>{
   try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json());
     bmeHz.textContent=s.bme_actual_hz.toFixed(1)+' Hz';powerHz.textContent=s.power_actual_hz.toFixed(1)+' Hz';audioHz.textContent=s.audio_actual_hz.toFixed(1)+' Hz';
-    bmeDetail.textContent='queue '+s.bme_queue+' · overruns '+s.bme_overruns;powerDetail.textContent='queue '+s.power_queue+' · overruns '+s.power_overruns;audioDetail.textContent='queue '+s.audio_queue+' · overruns '+s.audio_overruns;
+    bmeDetail.textContent='queue '+s.bme_queue+' · overruns '+s.bme_overruns;powerDetail.textContent='queue '+s.power_queue+' · overruns '+s.power_overruns;audioDetail.textContent='queue '+s.audio_queue+' · overruns '+s.audio_overruns;transportDetail.dataset.queue='queue '+s.transport_queue+' · dropped '+s.transport_drops;
   }catch(e){}
   const dp=packetCount-prevPackets,db=bytesReceived-prevBytes;prevPackets=packetCount;prevBytes=bytesReceived;
-  packetHz.textContent=dp+' pkt/s';transportDetail.textContent=(db/1024).toFixed(1)+' KiB/s · gaps '+packetGaps;
-  jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='sequence loss B/P/A '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
+  packetHz.textContent=dp+' pkt/s';transportDetail.textContent=(db/1024).toFixed(1)+' KiB/s · packet gaps '+packetGaps+' · '+(transportDetail.dataset.queue||'');
+  jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='sample loss B/P/A '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' · display underruns '+displayUnderruns+' · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
 },1000);
 connect();requestAnimationFrame(render);
 </script>

@@ -31,6 +31,8 @@ constexpr uint32_t TRANSPORT_INTERVAL_MS = 20;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 64;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
+constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
+constexpr size_t TRANSPORT_QUEUE_DEPTH = 4;
 
 struct BmeSample {
   uint32_t sequence;
@@ -70,10 +72,18 @@ struct PacketHeader {
   uint32_t audioOverruns;
 } __attribute__((packed));
 
+struct TransportPacket {
+  uint16_t length;
+  uint8_t data[TRANSPORT_PACKET_BYTES];
+};
+
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
 static_assert(sizeof(PacketHeader) == 40, "packet header changed");
+static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
+  MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
+  <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
 
 WebServer server(80);
 WebSocketsServer webSocket(81);
@@ -93,6 +103,8 @@ volatile float powerActualHz = 0;
 volatile float audioActualHz = 0;
 
 static SemaphoreHandle_t latestMutex;
+static QueueHandle_t transportQueue;
+static volatile uint32_t transportDrops = 0;
 static BmeSample latestBme = {};
 static PowerSample latestPower = {};
 static AudioSample latestAudio = {};
@@ -150,6 +162,8 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"bme_overruns\":" + String(bmeRing.overruns()) + ",";
   json += "\"power_overruns\":" + String(powerRing.overruns()) + ",";
   json += "\"audio_overruns\":" + String(audioRing.overruns()) + ",";
+  json += "\"transport_queue\":" + String(uxQueueMessagesWaiting(transportQueue)) + ",";
+  json += "\"transport_drops\":" + String(transportDrops) + ",";
   json += "\"temp_ok\":" + String(bmeOk ? "true" : "false") + ",";
   json += "\"temp_c\":" + String(bme.temperature, 4) + ",";
   json += "\"humidity\":" + String(bme.humidity, 4) + ",";
@@ -262,9 +276,8 @@ static void setupOTA() {
   ArduinoOTA.begin();
 }
 
-static void sendBatch() {
+static bool buildBatch(TransportPacket& packet) {
   static uint32_t packetSequence = 0;
-  static uint8_t packet[2048];
   BmeSample bme[MAX_BME_PER_PACKET];
   PowerSample power[MAX_POWER_PER_PACKET];
   AudioSample audio[MAX_AUDIO_PER_PACKET];
@@ -272,7 +285,7 @@ static void sendBatch() {
   size_t bmeCount = bmeRing.pop(bme, MAX_BME_PER_PACKET);
   size_t powerCount = powerRing.pop(power, MAX_POWER_PER_PACKET);
   size_t audioCount = audioRing.pop(audio, MAX_AUDIO_PER_PACKET);
-  if (bmeCount + powerCount + audioCount == 0) return;
+  if (bmeCount + powerCount + audioCount == 0) return false;
 
   PacketHeader header = {
     {'E', 'S', 'K', 'Y'}, 1, 0, sizeof(PacketHeader), ++packetSequence, nowUs(),
@@ -282,15 +295,31 @@ static void sendBatch() {
   };
 
   size_t offset = 0;
-  memcpy(packet + offset, &header, sizeof(header));
+  memcpy(packet.data + offset, &header, sizeof(header));
   offset += sizeof(header);
-  memcpy(packet + offset, bme, bmeCount * sizeof(BmeSample));
+  memcpy(packet.data + offset, bme, bmeCount * sizeof(BmeSample));
   offset += bmeCount * sizeof(BmeSample);
-  memcpy(packet + offset, power, powerCount * sizeof(PowerSample));
+  memcpy(packet.data + offset, power, powerCount * sizeof(PowerSample));
   offset += powerCount * sizeof(PowerSample);
-  memcpy(packet + offset, audio, audioCount * sizeof(AudioSample));
+  memcpy(packet.data + offset, audio, audioCount * sizeof(AudioSample));
   offset += audioCount * sizeof(AudioSample);
-  webSocket.broadcastBIN(packet, offset);
+  packet.length = offset;
+  return true;
+}
+
+static void transportTask(void*) {
+  TickType_t lastWake = xTaskGetTickCount();
+  TransportPacket packet;
+  TransportPacket stale;
+  while (true) {
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(TRANSPORT_INTERVAL_MS));
+    if (otaInProgress || !buildBatch(packet)) continue;
+    if (xQueueSend(transportQueue, &packet, 0) != pdTRUE) {
+      xQueueReceive(transportQueue, &stale, 0);
+      transportDrops++;
+      xQueueSend(transportQueue, &packet, 0);
+    }
+  }
 }
 
 static void webSocketEvent(uint8_t number, WStype_t type, uint8_t*, size_t) {
@@ -307,7 +336,8 @@ void setup() {
   Serial.println("=================================");
 
   latestMutex = xSemaphoreCreateMutex();
-  if (!latestMutex || !sensors.begin()) {
+  transportQueue = xQueueCreate(TRANSPORT_QUEUE_DEPTH, sizeof(TransportPacket));
+  if (!latestMutex || !transportQueue || !sensors.begin()) {
     Serial.println("Sensor initialization failed. Halting.");
     while (true) delay(1000);
   }
@@ -372,6 +402,7 @@ void setup() {
   xTaskCreatePinnedToCore(bmeTask, "bme", 4096, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(powerTask, "power", 4096, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(rateTask, "rates", 3072, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(transportTask, "transport", 8192, nullptr, 4, nullptr, 1);
   Serial.println("Dashboard: http://electric-sky.local/");
 }
 
@@ -380,12 +411,9 @@ void loop() {
   server.handleClient();
   webSocket.loop();
 
-  static uint32_t lastTransport = 0;
-  if (!otaInProgress && millis() - lastTransport >= TRANSPORT_INTERVAL_MS) {
-    // Never replay missed network deadlines in a burst. Samples remain in
-    // their rings and are drained in subsequent regularly paced batches.
-    lastTransport = millis();
-    sendBatch();
+  TransportPacket packet;
+  if (!otaInProgress && xQueueReceive(transportQueue, &packet, 0) == pdTRUE) {
+    webSocket.broadcastBIN(packet.data, packet.length);
   }
 
   static uint32_t lastWifiCheck = 0;
