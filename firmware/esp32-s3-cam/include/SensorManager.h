@@ -12,7 +12,6 @@ public:
   INA219Reading readPower();
   BME280Reading readClimate();
   bool readAudio(AudioObservables& output);
-  void stopForOTA();
 
 private:
   Camera camera;

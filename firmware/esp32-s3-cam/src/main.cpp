@@ -239,7 +239,6 @@ static void setupOTA() {
   ArduinoOTA.setPort(3232);
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
-    sensors.stopForOTA();
     Serial.println("OTA start");
   });
   ArduinoOTA.onEnd([]() { Serial.println("\nOTA end"); });

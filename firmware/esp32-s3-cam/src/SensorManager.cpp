@@ -1,6 +1,5 @@
 #include "SensorManager.h"
 #include <Wire.h>
-#include <driver/i2s.h>
 
 #define I2C_SDA 42
 #define I2C_SCL 41
@@ -58,10 +57,6 @@ bool SensorManager::begin() {
   Serial.println("  INMP441 OK");
 
   return true;
-}
-
-void SensorManager::stopForOTA() {
-  i2s_driver_uninstall(I2S_NUM_0);
 }
 
 INA219Reading SensorManager::readPower() {
