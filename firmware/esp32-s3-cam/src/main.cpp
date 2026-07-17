@@ -98,6 +98,7 @@ static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
 WebServer server(80);
 WebSocketsServer webSocket(81);
 SensorManager sensors;
+static volatile int8_t activeWebSocketClient = -1;
 
 SampleRing<BmeSample, 256> bmeRing;
 SampleRing<PowerSample, 1024> powerRing;
@@ -338,8 +339,17 @@ static void transportTask(void*) {
 }
 
 static void webSocketEvent(uint8_t number, WStype_t type, uint8_t*, size_t) {
-  if (type == WStype_CONNECTED) Serial.printf("[WS] client %u connected\n", number);
-  if (type == WStype_DISCONNECTED) Serial.printf("[WS] client %u disconnected\n", number);
+  if (type == WStype_CONNECTED) {
+    if (activeWebSocketClient >= 0 && activeWebSocketClient != number) {
+      webSocket.disconnect(static_cast<uint8_t>(activeWebSocketClient));
+    }
+    activeWebSocketClient = number;
+    Serial.printf("[WS] client %u connected\n", number);
+  }
+  if (type == WStype_DISCONNECTED) {
+    if (activeWebSocketClient == number) activeWebSocketClient = -1;
+    Serial.printf("[WS] client %u disconnected\n", number);
+  }
 }
 
 void setup() {
@@ -405,6 +415,7 @@ void setup() {
 
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
+  webSocket.enableHeartbeat(5000, 1000, 1);
 
   // Network delivery and OTA must preempt acquisition briefly. Every loop
   // iteration yields, so sensor tasks still run while packet timing remains
@@ -428,7 +439,12 @@ void loop() {
 
   TransportPacket packet;
   if (!otaInProgress && xQueueReceive(transportQueue, &packet, 0) == pdTRUE) {
-    webSocket.broadcastBIN(packet.data, packet.length);
+    int8_t client = activeWebSocketClient;
+    if (client >= 0 && (!webSocket.clientIsConnected(client) ||
+        !webSocket.sendBIN(static_cast<uint8_t>(client), packet.data, packet.length))) {
+      webSocket.disconnect(static_cast<uint8_t>(client));
+      if (activeWebSocketClient == client) activeWebSocketClient = -1;
+    }
   }
 
   static uint32_t lastWifiCheck = 0;
