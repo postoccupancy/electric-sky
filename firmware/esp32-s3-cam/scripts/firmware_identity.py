@@ -16,7 +16,7 @@ def git(*args):
 try:
     git_sha = git("rev-parse", "--short=12", "HEAD")
     tracked_dirty = subprocess.call(
-        ["git", "diff", "--quiet", "HEAD", "--"], cwd=project_dir
+        ["git", "diff", "--quiet", "HEAD", "--", "."], cwd=project_dir
     ) != 0
 except (OSError, subprocess.CalledProcessError):
     git_sha = "unknown"
