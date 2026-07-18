@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <time.h>
@@ -34,6 +35,9 @@ constexpr size_t MAX_AUDIO_PER_PACKET = 16;
 constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
 constexpr size_t TRANSPORT_QUEUE_DEPTH = 120;
 constexpr uint16_t INA219_CONVERSION_US = 1064;
+constexpr uint16_t OSC_ROUTER_PORT = 5005;
+constexpr size_t OSC_PACKET_BYTES = 1472;
+const IPAddress OSC_ROUTER_IP(192, 168, 0, 41);
 
 struct BmeSample {
   uint32_t sequence;
@@ -92,6 +96,57 @@ struct TransportPacket {
   uint8_t data[TRANSPORT_PACKET_BYTES];
 };
 
+struct OscWriter {
+  uint8_t* data;
+  size_t capacity;
+  size_t length = 0;
+  bool ok = true;
+
+  OscWriter(uint8_t* output, size_t outputCapacity)
+    : data(output), capacity(outputCapacity) {}
+
+  void bytes(const void* source, size_t count) {
+    if (!ok || length + count > capacity) { ok = false; return; }
+    memcpy(data + length, source, count);
+    length += count;
+  }
+  void u32(uint32_t value) {
+    uint8_t encoded[4] = {
+      static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+      static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)
+    };
+    bytes(encoded, sizeof(encoded));
+  }
+  void i32(int32_t value) { u32(static_cast<uint32_t>(value)); }
+  void f32(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    u32(bits);
+  }
+  void f64(double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    uint8_t encoded[8];
+    for (int i = 0; i < 8; i++) encoded[i] = static_cast<uint8_t>(bits >> (56 - i * 8));
+    bytes(encoded, sizeof(encoded));
+  }
+  void string(const char* value) {
+    size_t count = strlen(value) + 1;
+    size_t padded = (count + 3) & ~static_cast<size_t>(3);
+    if (!ok || length + padded > capacity) { ok = false; return; }
+    memset(data + length, 0, padded);
+    memcpy(data + length, value, count - 1);
+    length += padded;
+  }
+  void patchU32(size_t position, uint32_t value) {
+    if (position + 4 > capacity) { ok = false; return; }
+    data[position] = static_cast<uint8_t>(value >> 24);
+    data[position + 1] = static_cast<uint8_t>(value >> 16);
+    data[position + 2] = static_cast<uint8_t>(value >> 8);
+    data[position + 3] = static_cast<uint8_t>(value);
+  }
+};
+
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
@@ -102,6 +157,7 @@ static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
 
 WebServer server(80);
 WebSocketsServer webSocket(81);
+WiFiUDP oscUdp;
 SensorManager sensors;
 static volatile uint8_t webSocketClients = 0;
 
@@ -127,6 +183,10 @@ static QueueHandle_t transportQueue;
 static StaticQueue_t transportQueueControl;
 static uint8_t* transportQueueStorage = nullptr;
 static volatile uint32_t transportDrops = 0;
+static volatile uint32_t oscPacketsSent = 0;
+static volatile uint32_t oscSendFailures = 0;
+static volatile uint16_t oscLargestPacket = 0;
+static uint8_t oscPacketBuffer[OSC_PACKET_BYTES];
 static BmeSample latestBme = {};
 static PowerSample latestPower = {};
 static AudioSample latestAudio = {};
@@ -136,6 +196,129 @@ static bool hasAudio = false;
 
 static uint64_t nowUs() {
   return static_cast<uint64_t>(esp_timer_get_time());
+}
+
+static void beginOscBundle(OscWriter& writer) {
+  writer.string("#bundle");
+  writer.u32(0);
+  writer.u32(1); // OSC immediate timetag
+}
+
+static size_t beginOscElement(OscWriter& writer) {
+  size_t sizePosition = writer.length;
+  writer.u32(0);
+  return sizePosition;
+}
+
+static void finishOscElement(OscWriter& writer, size_t sizePosition) {
+  writer.patchU32(sizePosition, static_cast<uint32_t>(writer.length - sizePosition - 4));
+}
+
+static void writeOscBatchHeader(OscWriter& writer, const char* address,
+                                const char* typeTags, const PacketHeader& header) {
+  writer.string(address);
+  writer.string(typeTags);
+  writer.u32(header.packetSequence);
+  writer.f64(static_cast<double>(header.sendTimeUs));
+}
+
+static bool sendOscPacket(OscWriter& writer) {
+  if (!writer.ok || writer.length == 0 || WiFi.status() != WL_CONNECTED) {
+    oscSendFailures++;
+    return false;
+  }
+  if (!oscUdp.beginPacket(OSC_ROUTER_IP, OSC_ROUTER_PORT) ||
+      oscUdp.write(writer.data, writer.length) != writer.length ||
+      !oscUdp.endPacket()) {
+    oscSendFailures++;
+    return false;
+  }
+  oscPacketsSent++;
+  if (writer.length > oscLargestPacket) oscLargestPacket = writer.length;
+  return true;
+}
+
+static void sendOscBatches(const TransportPacket& packet) {
+  if (packet.length < sizeof(PacketHeader)) return;
+  PacketHeader header;
+  memcpy(&header, packet.data, sizeof(header));
+  if (memcmp(header.magic, "ESKY", 4) != 0 || header.headerBytes != sizeof(PacketHeader)) return;
+
+  size_t bmeOffset = header.headerBytes;
+  size_t powerOffset = bmeOffset + header.bmeCount * sizeof(BmeSample);
+  size_t audioOffset = powerOffset + header.powerCount * sizeof(PowerSample);
+  if (audioOffset + header.audioCount * sizeof(AudioSample) > packet.length) return;
+
+  // Climate and RMS are small enough to share one sub-MTU OSC bundle.
+  if (header.bmeCount > 0 || header.audioCount > 0) {
+    OscWriter writer{oscPacketBuffer, sizeof(oscPacketBuffer)};
+    beginOscBundle(writer);
+    if (header.bmeCount > 0) {
+      char tags[4 + MAX_BME_PER_PACKET * 5] = {',', 'i', 'd'};
+      size_t tag = 3;
+      for (size_t i = 0; i < header.bmeCount; i++) {
+        for (char type : {'i', 'i', 'f', 'f', 'f'}) tags[tag++] = type;
+      }
+      tags[tag] = '\0';
+      size_t element = beginOscElement(writer);
+      writeOscBatchHeader(writer, "/sensor/electric-sky/bme_batch", tags, header);
+      for (size_t i = 0; i < header.bmeCount; i++) {
+        BmeSample sample;
+        memcpy(&sample, packet.data + bmeOffset + i * sizeof(sample), sizeof(sample));
+        writer.u32(sample.sequence);
+        writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                        static_cast<int64_t>(header.sendTimeUs)));
+        writer.f32(sample.temperature);
+        writer.f32(sample.humidity);
+        writer.f32(sample.pressure);
+      }
+      finishOscElement(writer, element);
+    }
+    if (header.audioCount > 0) {
+      char tags[4 + MAX_AUDIO_PER_PACKET * 3] = {',', 'i', 'd'};
+      size_t tag = 3;
+      for (size_t i = 0; i < header.audioCount; i++) {
+        for (char type : {'i', 'i', 'f'}) tags[tag++] = type;
+      }
+      tags[tag] = '\0';
+      size_t element = beginOscElement(writer);
+      writeOscBatchHeader(writer, "/sensor/electric-sky/audio_batch", tags, header);
+      for (size_t i = 0; i < header.audioCount; i++) {
+        AudioSample sample;
+        memcpy(&sample, packet.data + audioOffset + i * sizeof(sample), sizeof(sample));
+        writer.u32(sample.sequence);
+        writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                        static_cast<int64_t>(header.sendTimeUs)));
+        writer.f32(sample.rmsDb);
+      }
+      finishOscElement(writer, element);
+    }
+    sendOscPacket(writer);
+  }
+
+  // Power is isolated so a full 63-sample message remains below the MTU.
+  if (header.powerCount > 0) {
+    OscWriter writer{oscPacketBuffer, sizeof(oscPacketBuffer)};
+    beginOscBundle(writer);
+    char tags[4 + MAX_POWER_PER_PACKET * 3] = {',', 'i', 'd'};
+    size_t tag = 3;
+    for (size_t i = 0; i < header.powerCount; i++) {
+      for (char type : {'i', 'i', 'f'}) tags[tag++] = type;
+    }
+    tags[tag] = '\0';
+    size_t element = beginOscElement(writer);
+    writeOscBatchHeader(writer, "/sensor/electric-sky/power_batch", tags, header);
+    for (size_t i = 0; i < header.powerCount; i++) {
+      PowerSample sample;
+      memcpy(&sample, packet.data + powerOffset + i * sizeof(sample), sizeof(sample));
+      writer.u32(sample.sequence);
+      writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                      static_cast<int64_t>(header.sendTimeUs)));
+      writer.f32(sample.powerMw);
+    }
+    finishOscElement(writer, element);
+    sendOscPacket(writer);
+  }
 }
 
 static String isoTime() {
@@ -186,6 +369,10 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"audio_overruns\":" + String(audioRing.overruns()) + ",";
   json += "\"transport_queue\":" + String(uxQueueMessagesWaiting(transportQueue)) + ",";
   json += "\"transport_drops\":" + String(transportDrops) + ",";
+  json += "\"osc_router\":\"" + OSC_ROUTER_IP.toString() + ":" + String(OSC_ROUTER_PORT) + "\",";
+  json += "\"osc_packets_sent\":" + String(oscPacketsSent) + ",";
+  json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
+  json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
   json += "\"temp_ok\":" + String(bmeOk ? "true" : "false") + ",";
   json += "\"temp_c\":" + String(bme.temperature, 4) + ",";
   json += "\"humidity\":" + String(bme.humidity, 4) + ",";
@@ -489,6 +676,7 @@ void loop() {
 
   TransportPacket packet;
   if (!otaInProgress && xQueueReceive(transportQueue, &packet, 0) == pdTRUE) {
+    sendOscBatches(packet);
     uint8_t clients = webSocketClients;
     for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++) {
       if (!(clients & (1U << client))) continue;
