@@ -215,11 +215,13 @@ static void finishOscElement(OscWriter& writer, size_t sizePosition) {
 }
 
 static void writeOscBatchHeader(OscWriter& writer, const char* address,
-                                const char* typeTags, const PacketHeader& header) {
+                                const char* typeTags, const char* unit,
+                                const PacketHeader& header) {
   writer.string(address);
   writer.string(typeTags);
   writer.u32(header.packetSequence);
   writer.f64(static_cast<double>(header.sendTimeUs));
+  writer.string(unit);
 }
 
 static bool sendOscPacket(OscWriter& writer) {
@@ -254,35 +256,42 @@ static void sendOscBatches(const TransportPacket& packet) {
     OscWriter writer{oscPacketBuffer, sizeof(oscPacketBuffer)};
     beginOscBundle(writer);
     if (header.bmeCount > 0) {
-      char tags[4 + MAX_BME_PER_PACKET * 5] = {',', 'i', 'd'};
-      size_t tag = 3;
-      for (size_t i = 0; i < header.bmeCount; i++) {
-        for (char type : {'i', 'i', 'f', 'f', 'f'}) tags[tag++] = type;
+      const char* addresses[] = {
+        "/batch/electric-sky/temperature",
+        "/batch/electric-sky/humidity",
+        "/batch/electric-sky/pressure"
+      };
+      const char* units[] = {"celsius", "percent", "hpa"};
+      for (size_t channel = 0; channel < 3; channel++) {
+        char tags[5 + MAX_BME_PER_PACKET * 3] = {',', 'i', 'd', 's'};
+        size_t tag = 4;
+        for (size_t i = 0; i < header.bmeCount; i++) {
+          for (char type : {'i', 'i', 'f'}) tags[tag++] = type;
+        }
+        tags[tag] = '\0';
+        size_t element = beginOscElement(writer);
+        writeOscBatchHeader(writer, addresses[channel], tags, units[channel], header);
+        for (size_t i = 0; i < header.bmeCount; i++) {
+          BmeSample sample;
+          memcpy(&sample, packet.data + bmeOffset + i * sizeof(sample), sizeof(sample));
+          writer.u32(sample.sequence);
+          writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                          static_cast<int64_t>(header.sendTimeUs)));
+          const float values[] = {sample.temperature, sample.humidity, sample.pressure};
+          writer.f32(values[channel]);
+        }
+        finishOscElement(writer, element);
       }
-      tags[tag] = '\0';
-      size_t element = beginOscElement(writer);
-      writeOscBatchHeader(writer, "/sensor/electric-sky/bme_batch", tags, header);
-      for (size_t i = 0; i < header.bmeCount; i++) {
-        BmeSample sample;
-        memcpy(&sample, packet.data + bmeOffset + i * sizeof(sample), sizeof(sample));
-        writer.u32(sample.sequence);
-        writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
-                                        static_cast<int64_t>(header.sendTimeUs)));
-        writer.f32(sample.temperature);
-        writer.f32(sample.humidity);
-        writer.f32(sample.pressure);
-      }
-      finishOscElement(writer, element);
     }
     if (header.audioCount > 0) {
-      char tags[4 + MAX_AUDIO_PER_PACKET * 3] = {',', 'i', 'd'};
-      size_t tag = 3;
+      char tags[5 + MAX_AUDIO_PER_PACKET * 3] = {',', 'i', 'd', 's'};
+      size_t tag = 4;
       for (size_t i = 0; i < header.audioCount; i++) {
         for (char type : {'i', 'i', 'f'}) tags[tag++] = type;
       }
       tags[tag] = '\0';
       size_t element = beginOscElement(writer);
-      writeOscBatchHeader(writer, "/sensor/electric-sky/audio_batch", tags, header);
+      writeOscBatchHeader(writer, "/batch/electric-sky/rms", tags, "dbfs", header);
       for (size_t i = 0; i < header.audioCount; i++) {
         AudioSample sample;
         memcpy(&sample, packet.data + audioOffset + i * sizeof(sample), sizeof(sample));
@@ -300,14 +309,14 @@ static void sendOscBatches(const TransportPacket& packet) {
   if (header.powerCount > 0) {
     OscWriter writer{oscPacketBuffer, sizeof(oscPacketBuffer)};
     beginOscBundle(writer);
-    char tags[4 + MAX_POWER_PER_PACKET * 3] = {',', 'i', 'd'};
-    size_t tag = 3;
+    char tags[5 + MAX_POWER_PER_PACKET * 3] = {',', 'i', 'd', 's'};
+    size_t tag = 4;
     for (size_t i = 0; i < header.powerCount; i++) {
       for (char type : {'i', 'i', 'f'}) tags[tag++] = type;
     }
     tags[tag] = '\0';
     size_t element = beginOscElement(writer);
-    writeOscBatchHeader(writer, "/sensor/electric-sky/power_batch", tags, header);
+    writeOscBatchHeader(writer, "/batch/electric-sky/power", tags, "mw", header);
     for (size_t i = 0; i < header.powerCount; i++) {
       PowerSample sample;
       memcpy(&sample, packet.data + powerOffset + i * sizeof(sample), sizeof(sample));
