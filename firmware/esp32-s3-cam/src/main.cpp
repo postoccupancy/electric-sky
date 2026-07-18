@@ -567,6 +567,9 @@ static void transportTask(void*) {
   while (true) {
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(TRANSPORT_INTERVAL_MS));
     if (otaInProgress || !buildBatch(packet)) continue;
+    // OSC is the live art-data path and must not wait behind a blocked
+    // dashboard WebSocket client in loop().
+    sendOscBatches(packet);
     if (xQueueSend(transportQueue, &packet, 0) != pdTRUE) {
       xQueueReceive(transportQueue, &stale, 0);
       transportDrops++;
@@ -676,7 +679,6 @@ void loop() {
 
   TransportPacket packet;
   if (!otaInProgress && xQueueReceive(transportQueue, &packet, 0) == pdTRUE) {
-    sendOscBatches(packet);
     uint8_t clients = webSocketClients;
     for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++) {
       if (!(clients & (1U << client))) continue;
