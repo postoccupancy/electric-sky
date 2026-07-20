@@ -8,7 +8,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <title>Electric Sky</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#080a0d;color:#dce6ee;font:12px monospace}
-header{position:sticky;top:0;z-index:2;background:#080a0dee;border-bottom:1px solid #26313a;padding:12px 18px;display:flex;justify-content:space-between;gap:16px}a{color:#adf}
+header{position:sticky;top:0;z-index:2;background:#080a0dee;border-bottom:1px solid #26313a;padding:12px 18px;display:flex;justify-content:space-between;gap:16px}
 h1{margin:0;color:#adf;font-size:16px;letter-spacing:.12em}.live{color:#55ee88}.err{color:#ff6677}
 main{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;padding:12px}
 .scope{border:1px solid #202a32;background:#0c1015;min-width:0}.scope-head{padding:9px 11px;display:flex;justify-content:space-between;border-bottom:1px solid #202a32}
@@ -17,16 +17,18 @@ canvas{display:block;width:100%;height:170px;background:#07090c}
 #diag{grid-column:1/-1;padding:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;border:1px solid #202a32;background:#0c1015}
 .metric{color:#778894}.metric span{color:#dce6ee}.sub{color:#53616b;font-size:10px}
 .controls{display:flex;align-items:center;gap:8px;color:#8ba0af}.controls input{width:150px}.controls button{background:#17212a;color:#adf;border:1px solid #33424e;padding:4px 7px;font:11px monospace}.healthy{color:#55ee88!important}.low{color:#ffcc66!important}.loss{color:#ff6677!important}
+.camera-body{padding:12px;text-align:center}.camera-body img{display:block;width:320px;max-width:100%;height:auto;margin:auto;border:1px solid #26313a}.camera-controls{display:flex;align-items:center;gap:7px}.camera-controls button,.camera-controls select{background:#17212a;color:#adf;border:1px solid #33424e;padding:4px 7px;font:11px monospace}.camera-caption{margin:9px 0 0;color:#8ba0af}.camera-activity{display:inline-block;width:6px;height:6px;border-radius:50%;background:#45515b}.camera-activity.busy{background:#7fa0b8;animation:cameraPulse .7s ease-in-out infinite alternate}.camera-activity.error{background:#d65b68}@keyframes cameraPulse{to{opacity:.25}}
 </style>
 </head>
 <body>
-<header><h1>ELECTRIC SKY · SIGNALS</h1><div class="controls"><a href="/camera">camera</a><label>Presentation delay <input id="delay" type="range" min="0.5" max="10" step="0.25" value="6"><span id="delayValue">6.00s</span></label><button id="useRecommended">use recommended</button><div id="connection">connecting</div></div></header>
+<header><h1>ELECTRIC SKY · SIGNALS</h1><div class="controls"><label>Presentation delay <input id="delay" type="range" min="0.5" max="10" step="0.25" value="6"><span id="delayValue">6.00s</span></label><button id="useRecommended">use recommended</button><div id="connection">connecting</div></div></header>
 <main>
 <section class="scope"><div class="scope-head"><span class="name">Temperature</span><span class="reading" id="tempValue">—</span></div><canvas id="temp"></canvas></section>
 <section class="scope"><div class="scope-head"><span class="name">Humidity</span><span class="reading" id="humidityValue">—</span></div><canvas id="humidity"></canvas></section>
 <section class="scope"><div class="scope-head"><span class="name">Pressure</span><span class="reading" id="pressureValue">—</span></div><canvas id="pressure"></canvas></section>
 <section class="scope"><div class="scope-head"><span class="name">Power</span><span class="reading" id="powerValue">—</span></div><canvas id="power"></canvas></section>
 <section class="scope"><div class="scope-head"><span class="name">Microphone RMS</span><span class="reading" id="audioValue">—</span></div><canvas id="audio"></canvas></section>
+<section class="scope" id="camera"><div class="scope-head"><span class="name">Camera</span><span class="camera-controls"><span id="cameraActivity" class="camera-activity" title="idle"></span><button id="cameraCapture">capture</button><label>auto <select id="cameraInterval"><option value="0">off</option><option value="1000">1s</option><option value="2000">2s</option><option value="5000">5s</option></select></label></span></div><div class="camera-body"><img id="cameraImage" alt="Camera snapshot"><p class="camera-caption" id="cameraCaption">last image —</p></div></section>
 <section id="diag">
   <div class="metric">BME acquire <span id="bmeHz">—</span><div class="sub" id="bmeDetail"></div></div>
   <div class="metric">Power acquire <span id="powerHz">—</span><div class="sub" id="powerDetail"></div></div>
@@ -51,6 +53,12 @@ let presentationDelayUs=6000000,recommendedDelaySec=.5;
 const WINDOW_US=10000000;
 const connection=document.getElementById('connection');
 const delay=document.getElementById('delay'),delayValue=document.getElementById('delayValue');
+const cameraImage=document.getElementById('cameraImage'),cameraCaption=document.getElementById('cameraCaption'),cameraActivity=document.getElementById('cameraActivity'),cameraInterval=document.getElementById('cameraInterval');let cameraTimer=null;
+function captureCamera(){cameraActivity.className='camera-activity busy';cameraActivity.title='capturing';cameraImage.src='/camera.jpg?t='+Date.now()}
+cameraImage.onload=()=>{cameraActivity.className='camera-activity';cameraActivity.title='idle';cameraCaption.textContent='last image '+new Date().toLocaleTimeString()};
+cameraImage.onerror=()=>{cameraActivity.className='camera-activity error';cameraActivity.title='capture failed'};
+document.getElementById('cameraCapture').onclick=captureCamera;
+cameraInterval.onchange=()=>{clearInterval(cameraTimer);cameraTimer=null;if(+cameraInterval.value){captureCamera();cameraTimer=setInterval(captureCamera,+cameraInterval.value)}};
 delay.oninput=()=>{presentationDelayUs=Number(delay.value)*1000000;delayValue.textContent=Number(delay.value).toFixed(2)+'s';const newest=newestTime();if(newest)viewEnd=newest-presentationDelayUs};
 useRecommended.onclick=()=>{delay.value=recommendedDelaySec;delay.oninput()};
 function u64(d,o){return Number(d.getBigUint64(o,true))}
@@ -92,7 +100,7 @@ setInterval(async()=>{
   jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='silence now/max '+currentSilence.toFixed(0)+'/'+longestSilence.toFixed(0)+'ms · sample gaps B/P/A events '+rings.temp.gapEvents+'/'+rings.power.gapEvents+'/'+rings.audio.gapEvents+' missing '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' duration '+(rings.temp.gapUs/1e6).toFixed(1)+'/'+(rings.power.gapUs/1e6).toFixed(1)+'/'+(rings.audio.gapUs/1e6).toFixed(1)+'s · underruns '+displayUnderruns+' for '+(totalUnderrun/1000).toFixed(1)+'s · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
   recommendedDelaySec=Math.min(10,Math.max(.5,Math.ceil((longestSilence+500)/250)*.25));const lead=viewEnd===null?0:(newestTime()-viewEnd)/1e6,loss=packetGaps>0||dropDelta>0,adequate=Number(delay.value)>=recommendedDelaySec;if(loss){bufferHealth.textContent='loss detected';bufferHealth.className='loss'}else if(inUnderrun||!adequate){bufferHealth.textContent=inUnderrun?'underrun':'increase delay';bufferHealth.className='low'}else{bufferHealth.textContent='healthy';bufferHealth.className='healthy'}bufferDetail.textContent='buffered '+lead.toFixed(2)+'s · configured '+Number(delay.value).toFixed(2)+'s · recommended '+recommendedDelaySec.toFixed(2)+'s from observed '+(longestSilence/1000).toFixed(2)+'s max silence'+(loss?' · permanent packet loss cannot be filled by latency':' · all observed delays covered');
 },1000);
-connect();requestAnimationFrame(render);
+captureCamera();connect();requestAnimationFrame(render);
 </script>
 </body>
 </html>)HTML";
