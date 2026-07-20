@@ -38,4 +38,7 @@ private:
   int _frameSize;
   uint32_t _frameId;
   bool _running;
+  bool _dcFilterReady;
+  float _dcPreviousInput;
+  float _dcPreviousOutput;
 };

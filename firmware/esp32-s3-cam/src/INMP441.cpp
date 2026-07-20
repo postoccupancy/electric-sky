@@ -12,7 +12,10 @@ INMP441::INMP441(int sckPin, int wsPin, int sdPin, int sampleRate, int frameSize
     _sampleRate(sampleRate),
     _frameSize(frameSize),
     _frameId(0),
-    _running(false) {}
+    _running(false),
+    _dcFilterReady(false),
+    _dcPreviousInput(0),
+    _dcPreviousOutput(0) {}
 
 bool INMP441::begin() {
   if (_running) return true;
@@ -104,7 +107,19 @@ bool INMP441::read(AudioObservables& out) {
     }
 
     prev = s;
-    int32_t pcm = s >> 8;
+    // Preserve continuity between I2S reads for the raw PCM stream. Subtracting
+    // each 4 ms frame's mean here creates an audible discontinuity at 250 Hz.
+    float filtered = 0;
+    const float input = static_cast<float>(samples[i]);
+    if (_dcFilterReady) {
+      filtered = input - _dcPreviousInput + 0.995f * _dcPreviousOutput;
+    } else {
+      _dcFilterReady = true;
+    }
+    _dcPreviousInput = input;
+    _dcPreviousOutput = filtered;
+
+    int32_t pcm = static_cast<int32_t>(filtered) >> 8;
     if (pcm > INT16_MAX) pcm = INT16_MAX;
     if (pcm < INT16_MIN) pcm = INT16_MIN;
     out.pcm16[i] = static_cast<int16_t>(pcm);
