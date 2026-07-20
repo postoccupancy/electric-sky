@@ -56,6 +56,14 @@ bool Camera::begin() {
     return false;
   }
 
+  // The camera module is mounted upside-down in the outdoor enclosure.
+  // Flip both axes so snapshots are rotated 180 degrees at capture time.
+  sensor_t* sensor = esp_camera_sensor_get();
+  if (sensor) {
+    sensor->set_vflip(sensor, 1);
+    sensor->set_hmirror(sensor, 1);
+  }
+
   Serial.println("Camera init OK");
   return true;
 }
