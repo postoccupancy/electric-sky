@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <time.h>
 
@@ -40,6 +41,7 @@ constexpr uint16_t PCM_ROUTER_PORT = 5007;
 constexpr uint32_t PCM_SAMPLE_RATE = 16000;
 constexpr size_t PCM_SAMPLES_PER_PACKET = 320;
 constexpr size_t PCM_QUEUE_DEPTH = 24;
+constexpr uint8_t PCM_FAILURE_LIMIT = 3;
 constexpr size_t OSC_PACKET_BYTES = 1472;
 const IPAddress OSC_ROUTER_IP(192, 168, 0, 41);
 
@@ -221,7 +223,9 @@ static volatile uint16_t oscLargestPacket = 0;
 static QueueHandle_t pcmQueue;
 static StaticQueue_t pcmQueueControl;
 static uint8_t* pcmQueueStorage = nullptr;
-static volatile bool pcmStreamEnabled = true;
+static volatile bool pcmStreamEnabled = false;
+static volatile bool pcmAutoDisabled = false;
+static volatile uint8_t pcmConsecutiveFailures = 0;
 static volatile uint32_t pcmPacketsQueued = 0;
 static volatile uint32_t pcmPacketsSent = 0;
 static volatile uint32_t pcmQueueDrops = 0;
@@ -233,6 +237,32 @@ static AudioSample latestAudio = {};
 static bool hasBme = false;
 static bool hasPower = false;
 static bool hasAudio = false;
+RTC_DATA_ATTR uint32_t bootCount = 0;
+static esp_reset_reason_t resetReason = ESP_RST_UNKNOWN;
+
+static const char* resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "power_on";
+    case ESP_RST_EXT: return "external";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT: return "task_watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep_sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "sdio";
+    default: return "unknown";
+  }
+}
+
+static void setPcmStreamEnabled(bool enabled, bool automatic = false) {
+  pcmStreamEnabled = enabled;
+  pcmAutoDisabled = automatic && !enabled;
+  pcmConsecutiveFailures = 0;
+  if (pcmQueue) xQueueReset(pcmQueue);
+  if (!enabled) pcmUdp.stop();
+}
 
 static uint64_t nowUs() {
   return static_cast<uint64_t>(esp_timer_get_time());
@@ -407,6 +437,12 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"firmware_git_dirty\":" + String(FW_GIT_DIRTY ? "true" : "false") + ",";
   json += "\"firmware_build_utc\":\"" FW_BUILD_UTC "\",";
   json += "\"uptime_ms\":" + String(millis()) + ",";
+  json += "\"boot_count\":" + String(bootCount) + ",";
+  json += "\"reset_reason_code\":" + String(static_cast<int>(resetReason)) + ",";
+  json += "\"reset_reason\":\"" + String(resetReasonName(resetReason)) + "\",";
+  json += "\"wifi_rssi_dbm\":" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",";
+  json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"min_free_heap\":" + String(ESP.getMinFreeHeap()) + ",";
   json += "\"timestamp\":\"" + isoTime() + "\",";
   json += "\"bme_actual_hz\":" + String(bmeActualHz, 2) + ",";
   json += "\"power_actual_hz\":" + String(powerActualHz, 2) + ",";
@@ -424,6 +460,9 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
   json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
   json += "\"pcm_stream_enabled\":" + String(pcmStreamEnabled ? "true" : "false") + ",";
+  json += "\"pcm_default_enabled\":false,";
+  json += "\"pcm_auto_disabled\":" + String(pcmAutoDisabled ? "true" : "false") + ",";
+  json += "\"pcm_consecutive_failures\":" + String(pcmConsecutiveFailures) + ",";
   json += "\"pcm_router\":\"" + OSC_ROUTER_IP.toString() + ":" + String(PCM_ROUTER_PORT) + "\",";
   json += "\"pcm_packets_queued\":" + String(pcmPacketsQueued) + ",";
   json += "\"pcm_packets_sent\":" + String(pcmPacketsSent) + ",";
@@ -576,9 +615,14 @@ static void pcmTransportTask(void*) {
         pcmUdp.write(reinterpret_cast<uint8_t*>(&packet), bytes) != bytes ||
         !pcmUdp.endPacket()) {
       pcmSendFailures++;
+      if (++pcmConsecutiveFailures >= PCM_FAILURE_LIMIT) {
+        setPcmStreamEnabled(false, true);
+      }
     } else {
       pcmPacketsSent++;
+      pcmConsecutiveFailures = 0;
     }
+    taskYIELD();
   }
 }
 
@@ -699,9 +743,13 @@ static void webSocketEvent(uint8_t number, WStype_t type, uint8_t*, size_t) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  resetReason = esp_reset_reason();
+  bootCount++;
   Serial.println("\n=================================");
   Serial.println(" Electric Sky Firmware");
   Serial.printf(" Git: %s%s  Built: %s\n", FW_GIT_SHA, FW_GIT_DIRTY ? "-dirty" : "", FW_BUILD_UTC);
+  Serial.printf(" Boot: %lu  Reset: %s (%d)\n", static_cast<unsigned long>(bootCount),
+    resetReasonName(resetReason), static_cast<int>(resetReason));
   Serial.println("=================================");
 
   latestMutex = xSemaphoreCreateMutex();
@@ -786,12 +834,12 @@ void setup() {
   server.on("/audio/raw", []() {
     if (server.hasArg("enabled")) {
       String value = server.arg("enabled");
-      pcmStreamEnabled = value == "1" || value == "true" || value == "on";
-      if (!pcmStreamEnabled) xQueueReset(pcmQueue);
+      setPcmStreamEnabled(value == "1" || value == "true" || value == "on");
     }
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", String("{\"enabled\":") +
-      (pcmStreamEnabled ? "true" : "false") + "}");
+      (pcmStreamEnabled ? "true" : "false") +
+      ",\"auto_disabled\":" + (pcmAutoDisabled ? "true" : "false") + "}");
   });
   server.on("/restart", []() {
     server.send(200, "text/plain", "restarting");
