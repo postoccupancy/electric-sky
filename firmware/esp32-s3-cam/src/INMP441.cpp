@@ -104,6 +104,10 @@ bool INMP441::read(AudioObservables& out) {
     }
 
     prev = s;
+    int32_t pcm = s >> 8;
+    if (pcm > INT16_MAX) pcm = INT16_MAX;
+    if (pcm < INT16_MIN) pcm = INT16_MIN;
+    out.pcm16[i] = static_cast<int16_t>(pcm);
   }
 
   int32_t rms = count > 0 ? (int32_t)sqrt(sumSq / count) : 0;

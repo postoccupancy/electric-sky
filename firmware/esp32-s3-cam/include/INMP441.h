@@ -2,6 +2,7 @@
 #include <Arduino.h>
 
 struct AudioObservables {
+  static constexpr int MAX_PCM_SAMPLES = 64;
   uint32_t frameId;
   int samples;
   int32_t dcOffset;
@@ -12,6 +13,7 @@ struct AudioObservables {
   float zcr;
   float crestFactor;
   uint32_t elapsedMs;
+  int16_t pcm16[MAX_PCM_SAMPLES];
 };
 
 class INMP441 {

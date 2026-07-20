@@ -36,6 +36,10 @@ constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
 constexpr size_t TRANSPORT_QUEUE_DEPTH = 120;
 constexpr uint16_t INA219_CONVERSION_US = 1064;
 constexpr uint16_t OSC_ROUTER_PORT = 5005;
+constexpr uint16_t PCM_ROUTER_PORT = 5007;
+constexpr uint32_t PCM_SAMPLE_RATE = 16000;
+constexpr size_t PCM_SAMPLES_PER_PACKET = 320;
+constexpr size_t PCM_QUEUE_DEPTH = 24;
 constexpr size_t OSC_PACKET_BYTES = 1472;
 const IPAddress OSC_ROUTER_IP(192, 168, 0, 41);
 
@@ -96,6 +100,25 @@ struct TransportPacket {
   uint8_t data[TRANSPORT_PACKET_BYTES];
 };
 
+struct PcmPacketHeader {
+  char magic[4];
+  uint8_t version;
+  uint8_t channels;
+  uint8_t bitsPerSample;
+  uint8_t flags;
+  uint32_t packetSequence;
+  uint64_t firstSampleTimeUs;
+  uint32_t sampleRate;
+  uint16_t sampleCount;
+  uint16_t headerBytes;
+  uint32_t queueDrops;
+} __attribute__((packed));
+
+struct PcmPacket {
+  PcmPacketHeader header;
+  int16_t samples[PCM_SAMPLES_PER_PACKET];
+} __attribute__((packed));
+
 struct OscWriter {
   uint8_t* data;
   size_t capacity;
@@ -151,6 +174,8 @@ static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
 static_assert(sizeof(PacketHeader) == 72, "packet header changed");
+static_assert(sizeof(PcmPacketHeader) == 32, "PCM header changed");
+static_assert(sizeof(PcmPacket) == 672, "PCM packet changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
   MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
   <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
@@ -158,6 +183,7 @@ static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
 WebServer server(80);
 WebSocketsServer webSocket(81);
 WiFiUDP oscUdp;
+WiFiUDP pcmUdp;
 SensorManager sensors;
 static volatile uint8_t webSocketClients = 0;
 
@@ -192,6 +218,14 @@ static volatile uint32_t transportDrops = 0;
 static volatile uint32_t oscPacketsSent = 0;
 static volatile uint32_t oscSendFailures = 0;
 static volatile uint16_t oscLargestPacket = 0;
+static QueueHandle_t pcmQueue;
+static StaticQueue_t pcmQueueControl;
+static uint8_t* pcmQueueStorage = nullptr;
+static volatile bool pcmStreamEnabled = true;
+static volatile uint32_t pcmPacketsQueued = 0;
+static volatile uint32_t pcmPacketsSent = 0;
+static volatile uint32_t pcmQueueDrops = 0;
+static volatile uint32_t pcmSendFailures = 0;
 static uint8_t oscPacketBuffer[OSC_PACKET_BYTES];
 static BmeSample latestBme = {};
 static PowerSample latestPower = {};
@@ -389,6 +423,13 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"osc_packets_sent\":" + String(oscPacketsSent) + ",";
   json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
   json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
+  json += "\"pcm_stream_enabled\":" + String(pcmStreamEnabled ? "true" : "false") + ",";
+  json += "\"pcm_router\":\"" + OSC_ROUTER_IP.toString() + ":" + String(PCM_ROUTER_PORT) + "\",";
+  json += "\"pcm_packets_queued\":" + String(pcmPacketsQueued) + ",";
+  json += "\"pcm_packets_sent\":" + String(pcmPacketsSent) + ",";
+  json += "\"pcm_queue\":" + String(pcmQueue ? uxQueueMessagesWaiting(pcmQueue) : 0) + ",";
+  json += "\"pcm_queue_drops\":" + String(pcmQueueDrops) + ",";
+  json += "\"pcm_send_failures\":" + String(pcmSendFailures) + ",";
   json += "\"camera_ok\":" + String(cameraOk ? "true" : "false") + ",";
   json += "\"camera_captures\":" + String(cameraCaptures) + ",";
   json += "\"camera_failures\":" + String(cameraFailures) + ",";
@@ -475,6 +516,9 @@ static void powerTask(void*) {
 
 static void audioTask(void*) {
   uint32_t sequence = 0;
+  uint32_t pcmSequence = 0;
+  PcmPacket pcmPacket = {};
+  size_t pcmCount = 0;
   while (true) {
     if (otaInProgress) {
       // This task owns I2S. Finish any active read, then stop the driver so
@@ -488,13 +532,53 @@ static void audioTask(void*) {
     }
     AudioObservables reading;
     if (!sensors.readAudio(reading)) continue;
-    AudioSample sample = {++sequence, nowUs(), reading.rmsDb};
+    uint64_t frameEndUs = nowUs();
+    AudioSample sample = {++sequence, frameEndUs, reading.rmsDb};
     audioRing.push(sample);
     audioProduced++;
     xSemaphoreTake(latestMutex, portMAX_DELAY);
     latestAudio = sample;
     hasAudio = true;
     xSemaphoreGive(latestMutex);
+
+    if (!pcmStreamEnabled || !pcmQueue) {
+      pcmCount = 0;
+      continue;
+    }
+    if (pcmCount == 0) {
+      pcmPacket.header = {
+        {'E', 'S', 'A', 'U'}, 1, 1, 16, 0, ++pcmSequence,
+        frameEndUs - static_cast<uint64_t>(reading.samples) * 1000000ULL / PCM_SAMPLE_RATE,
+        PCM_SAMPLE_RATE, 0, sizeof(PcmPacketHeader), pcmQueueDrops
+      };
+    }
+    size_t copyCount = min(static_cast<size_t>(reading.samples), PCM_SAMPLES_PER_PACKET - pcmCount);
+    memcpy(pcmPacket.samples + pcmCount, reading.pcm16, copyCount * sizeof(int16_t));
+    pcmCount += copyCount;
+    if (pcmCount == PCM_SAMPLES_PER_PACKET) {
+      pcmPacket.header.sampleCount = pcmCount;
+      pcmPacket.header.queueDrops = pcmQueueDrops;
+      if (xQueueSend(pcmQueue, &pcmPacket, 0) == pdTRUE) pcmPacketsQueued++;
+      else pcmQueueDrops++;
+      pcmCount = 0;
+    }
+  }
+}
+
+static void pcmTransportTask(void*) {
+  PcmPacket packet;
+  while (true) {
+    if (xQueueReceive(pcmQueue, &packet, pdMS_TO_TICKS(100)) != pdTRUE) continue;
+    if (otaInProgress || !pcmStreamEnabled) continue;
+    size_t bytes = packet.header.headerBytes + packet.header.sampleCount * sizeof(int16_t);
+    if (WiFi.status() != WL_CONNECTED ||
+        !pcmUdp.beginPacket(OSC_ROUTER_IP, PCM_ROUTER_PORT) ||
+        pcmUdp.write(reinterpret_cast<uint8_t*>(&packet), bytes) != bytes ||
+        !pcmUdp.endPacket()) {
+      pcmSendFailures++;
+    } else {
+      pcmPacketsSent++;
+    }
   }
 }
 
@@ -625,7 +709,11 @@ void setup() {
     TRANSPORT_QUEUE_DEPTH * sizeof(TransportPacket), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   transportQueue = transportQueueStorage ? xQueueCreateStatic(TRANSPORT_QUEUE_DEPTH,
     sizeof(TransportPacket), transportQueueStorage, &transportQueueControl) : nullptr;
-  if (!latestMutex || !transportQueue || !sensors.begin()) {
+  pcmQueueStorage = static_cast<uint8_t*>(heap_caps_malloc(
+    PCM_QUEUE_DEPTH * sizeof(PcmPacket), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  pcmQueue = pcmQueueStorage ? xQueueCreateStatic(PCM_QUEUE_DEPTH,
+    sizeof(PcmPacket), pcmQueueStorage, &pcmQueueControl) : nullptr;
+  if (!latestMutex || !transportQueue || !pcmQueue || !sensors.begin()) {
     Serial.println("Sensor initialization failed. Halting.");
     while (true) delay(1000);
   }
@@ -695,6 +783,16 @@ void setup() {
     sensors.releaseCamera(frame);
     server.client().stop();
   });
+  server.on("/audio/raw", []() {
+    if (server.hasArg("enabled")) {
+      String value = server.arg("enabled");
+      pcmStreamEnabled = value == "1" || value == "true" || value == "on";
+      if (!pcmStreamEnabled) xQueueReset(pcmQueue);
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", String("{\"enabled\":") +
+      (pcmStreamEnabled ? "true" : "false") + "}");
+  });
   server.on("/restart", []() {
     server.send(200, "text/plain", "restarting");
     server.client().stop();
@@ -716,6 +814,7 @@ void setup() {
   // Start acquisition only after transport is ready so setup delays cannot
   // fill the rings and create artificial sequence gaps at boot.
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(pcmTransportTask, "pcm-net", 4096, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(bmeTask, "bme", 4096, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(powerTask, "power", 4096, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(rateTask, "rates", 3072, nullptr, 1, nullptr, 1);
