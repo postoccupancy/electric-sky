@@ -14,6 +14,9 @@ public:
   bool readAudio(AudioObservables& output);
   void stopAudio();
   bool startAudio();
+  bool cameraAvailable() const;
+  camera_fb_t* captureCamera();
+  void releaseCamera(camera_fb_t* frame);
 
 private:
   Camera camera;

@@ -177,6 +177,12 @@ volatile uint32_t powerDuplicates = 0;
 volatile uint32_t powerIntervalMaxUs = 0;
 volatile uint16_t powerIntervalAvgUs = 0;
 volatile uint16_t powerDuplicatePermille = 0;
+volatile uint32_t cameraCaptures = 0;
+volatile uint32_t cameraFailures = 0;
+volatile uint32_t cameraLastBytes = 0;
+volatile uint32_t cameraLastCaptureMs = 0;
+volatile uint16_t cameraLastWidth = 0;
+volatile uint16_t cameraLastHeight = 0;
 
 static SemaphoreHandle_t latestMutex;
 static QueueHandle_t transportQueue;
@@ -358,7 +364,8 @@ static String makeStatusJson(bool* okOut = nullptr) {
   audioOk = hasAudio;
   xSemaphoreGive(latestMutex);
 
-  bool ok = bmeOk && powerOk && audioOk;
+  bool cameraOk = sensors.cameraAvailable();
+  bool ok = bmeOk && powerOk && audioOk && cameraOk;
   if (okOut) *okOut = ok;
 
   String json = "{";
@@ -382,6 +389,13 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"osc_packets_sent\":" + String(oscPacketsSent) + ",";
   json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
   json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
+  json += "\"camera_ok\":" + String(cameraOk ? "true" : "false") + ",";
+  json += "\"camera_captures\":" + String(cameraCaptures) + ",";
+  json += "\"camera_failures\":" + String(cameraFailures) + ",";
+  json += "\"camera_last_bytes\":" + String(cameraLastBytes) + ",";
+  json += "\"camera_last_capture_ms\":" + String(cameraLastCaptureMs) + ",";
+  json += "\"camera_width\":" + String(cameraLastWidth) + ",";
+  json += "\"camera_height\":" + String(cameraLastHeight) + ",";
   json += "\"temp_ok\":" + String(bmeOk ? "true" : "false") + ",";
   json += "\"temp_c\":" + String(bme.temperature, 4) + ",";
   json += "\"humidity\":" + String(bme.humidity, 4) + ",";
@@ -651,6 +665,40 @@ void setup() {
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(ok ? 200 : 503, "application/json", json);
+    server.client().stop();
+  });
+  server.on("/camera", []() {
+    static const char page[] PROGMEM = R"HTML(<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Electric Sky Camera</title><style>
+body{margin:0;background:#080a0d;color:#dce6ee;font:14px monospace}header{padding:12px 18px;border-bottom:1px solid #26313a;display:flex;justify-content:space-between;gap:16px;align-items:center}h1{margin:0;color:#adf;font-size:16px;letter-spacing:.12em}main{padding:16px;text-align:center}img{display:block;max-width:100%;height:auto;margin:auto;border:1px solid #26313a;image-rendering:auto}button,select{background:#17212a;color:#adf;border:1px solid #33424e;padding:6px 9px;font:12px monospace}#state{color:#8ba0af}</style></head>
+<body><header><h1>ELECTRIC SKY · CAMERA</h1><div><button id="capture">capture</button> <label>auto <select id="interval"><option value="0">off</option><option value="1000">1s</option><option value="2000">2s</option><option value="5000">5s</option></select></label></div></header><main><img id="image" alt="Camera snapshot"><p id="state">ready</p></main>
+<script>const image=document.getElementById('image'),state=document.getElementById('state'),interval=document.getElementById('interval');let timer=null;function capture(){state.textContent='capturing…';image.src='/camera.jpg?t='+Date.now()}image.onload=()=>state.textContent=image.naturalWidth+' × '+image.naturalHeight+' · '+new Date().toLocaleTimeString();image.onerror=()=>state.textContent='capture failed';document.getElementById('capture').onclick=capture;interval.onchange=()=>{clearInterval(timer);timer=null;if(+interval.value){capture();timer=setInterval(capture,+interval.value)}};capture();</script></body></html>)HTML";
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", page);
+    server.client().stop();
+  });
+  server.on("/camera.jpg", []() {
+    uint32_t started = millis();
+    camera_fb_t* frame = sensors.captureCamera();
+    if (!frame) {
+      cameraFailures++;
+      server.sendHeader("Connection", "close");
+      server.send(503, "text/plain", "camera capture failed");
+      server.client().stop();
+      return;
+    }
+    cameraCaptures++;
+    cameraLastBytes = frame->len;
+    cameraLastCaptureMs = millis() - started;
+    cameraLastWidth = frame->width;
+    cameraLastHeight = frame->height;
+    server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    server.sendHeader("Connection", "close");
+    server.setContentLength(frame->len);
+    server.send(200, "image/jpeg", "");
+    server.client().write(frame->buf, frame->len);
+    sensors.releaseCamera(frame);
     server.client().stop();
   });
   server.on("/restart", []() {

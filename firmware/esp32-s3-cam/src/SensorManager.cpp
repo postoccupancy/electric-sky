@@ -84,3 +84,15 @@ void SensorManager::stopAudio() {
 bool SensorManager::startAudio() {
   return mic.begin();
 }
+
+bool SensorManager::cameraAvailable() const {
+  return _cameraOk;
+}
+
+camera_fb_t* SensorManager::captureCamera() {
+  return _cameraOk ? camera.capture() : nullptr;
+}
+
+void SensorManager::releaseCamera(camera_fb_t* frame) {
+  camera.release(frame);
+}

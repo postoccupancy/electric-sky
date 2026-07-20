@@ -8,7 +8,7 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <title>Electric Sky</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#080a0d;color:#dce6ee;font:12px monospace}
-header{position:sticky;top:0;z-index:2;background:#080a0dee;border-bottom:1px solid #26313a;padding:12px 18px;display:flex;justify-content:space-between;gap:16px}
+header{position:sticky;top:0;z-index:2;background:#080a0dee;border-bottom:1px solid #26313a;padding:12px 18px;display:flex;justify-content:space-between;gap:16px}a{color:#adf}
 h1{margin:0;color:#adf;font-size:16px;letter-spacing:.12em}.live{color:#55ee88}.err{color:#ff6677}
 main{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;padding:12px}
 .scope{border:1px solid #202a32;background:#0c1015;min-width:0}.scope-head{padding:9px 11px;display:flex;justify-content:space-between;border-bottom:1px solid #202a32}
@@ -20,7 +20,7 @@ canvas{display:block;width:100%;height:170px;background:#07090c}
 </style>
 </head>
 <body>
-<header><h1>ELECTRIC SKY · SIGNALS</h1><div class="controls"><label>Presentation delay <input id="delay" type="range" min="0.5" max="10" step="0.25" value="6"><span id="delayValue">6.00s</span></label><button id="useRecommended">use recommended</button><div id="connection">connecting</div></div></header>
+<header><h1>ELECTRIC SKY · SIGNALS</h1><div class="controls"><a href="/camera">camera</a><label>Presentation delay <input id="delay" type="range" min="0.5" max="10" step="0.25" value="6"><span id="delayValue">6.00s</span></label><button id="useRecommended">use recommended</button><div id="connection">connecting</div></div></header>
 <main>
 <section class="scope"><div class="scope-head"><span class="name">Temperature</span><span class="reading" id="tempValue">—</span></div><canvas id="temp"></canvas></section>
 <section class="scope"><div class="scope-head"><span class="name">Humidity</span><span class="reading" id="humidityValue">—</span></div><canvas id="humidity"></canvas></section>
