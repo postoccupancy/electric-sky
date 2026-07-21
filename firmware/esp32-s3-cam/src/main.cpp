@@ -41,7 +41,10 @@ constexpr uint16_t PCM_ROUTER_PORT = 5007;
 constexpr uint32_t PCM_SAMPLE_RATE = 16000;
 constexpr size_t PCM_SAMPLES_PER_PACKET = 320;
 constexpr size_t PCM_QUEUE_DEPTH = 24;
-constexpr uint8_t PCM_FAILURE_LIMIT = 3;
+// UDP can briefly report send failures while Wi-Fi remains usable. Requiring a
+// sustained run preserves the safety cutoff without disabling audio after a
+// few congested packets.
+constexpr uint8_t PCM_FAILURE_LIMIT = 50;
 constexpr size_t OSC_PACKET_BYTES = 1472;
 const IPAddress OSC_ROUTER_IP(192, 168, 0, 41);
 
