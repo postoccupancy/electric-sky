@@ -512,6 +512,10 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"boot_count\":" + String(bootCount) + ",";
   json += "\"reset_reason_code\":" + String(static_cast<int>(resetReason)) + ",";
   json += "\"reset_reason\":\"" + String(resetReasonName(resetReason)) + "\",";
+  json += "\"wifi_ssid\":\"" + WiFi.SSID() + "\",";
+  json += "\"wifi_bssid\":\"" + WiFi.BSSIDstr() + "\",";
+  json += "\"wifi_channel\":" + String(WiFi.channel()) + ",";
+  json += "\"wifi_gateway\":\"" + WiFi.gatewayIP().toString() + "\",";
   json += "\"wifi_rssi_dbm\":" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",";
   json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
   json += "\"min_free_heap\":" + String(ESP.getMinFreeHeap()) + ",";

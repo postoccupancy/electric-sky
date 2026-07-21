@@ -16,7 +16,7 @@ main{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1
 canvas{display:block;width:100%;height:170px;background:#07090c}
 #diag{grid-column:1/-1;padding:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;border:1px solid #202a32;background:#0c1015}
 .metric{color:#778894}.metric span{color:#dce6ee}.sub{color:#53616b;font-size:10px}
-.controls{display:flex;align-items:center;gap:8px;color:#8ba0af}.controls input{width:150px}.controls button{background:#17212a;color:#adf;border:1px solid #33424e;padding:4px 7px;font:11px monospace}.healthy{color:#55ee88!important}.low{color:#ffcc66!important}.loss{color:#ff6677!important}
+.controls{display:flex;align-items:center;gap:8px;color:#8ba0af}.controls input{width:150px}.controls button,.metric button{background:#17212a;color:#adf;border:1px solid #33424e;padding:4px 7px;font:11px monospace}.metric button{margin-top:6px}.healthy{color:#55ee88!important}.low{color:#ffcc66!important}.loss{color:#ff6677!important}
 .camera-body{padding:12px;text-align:center}.camera-body img{display:block;width:320px;max-width:100%;height:auto;margin:auto;border:1px solid #26313a}.camera-controls{display:flex;align-items:center;gap:7px}.camera-controls button,.camera-controls select{background:#17212a;color:#adf;border:1px solid #33424e;padding:4px 7px;font:11px monospace}.camera-caption{margin:9px 0 0;color:#8ba0af}.camera-activity{display:inline-block;width:6px;height:6px;border-radius:50%;background:#45515b}.camera-activity.busy{background:#7fa0b8;animation:cameraPulse .7s ease-in-out infinite alternate}.camera-activity.error{background:#d65b68}@keyframes cameraPulse{to{opacity:.25}}
 </style>
 </head>
@@ -35,6 +35,7 @@ canvas{display:block;width:100%;height:170px;background:#07090c}
   <div class="metric">Audio acquire <span id="audioHz">—</span><div class="sub" id="audioDetail"></div></div>
   <div class="metric">Transport <span id="packetHz">—</span><div class="sub" id="transportDetail"></div></div>
   <div class="metric">Network <span id="networkHealth">waiting</span><div class="sub" id="networkDetail"></div></div>
+  <div class="metric">Wi-Fi <span id="wifiSsid">—</span><div class="sub" id="wifiIdentity"></div><button id="restartDevice">restart device</button></div>
   <div class="metric">Browser jitter <span id="jitter">—</span><div class="sub" id="browserDetail"></div></div>
   <div class="metric">Buffer health <span id="bufferHealth">waiting</span><div class="sub" id="bufferDetail"></div></div>
 </section>
@@ -63,6 +64,8 @@ document.getElementById('cameraCapture').onclick=captureCamera;
 cameraInterval.onchange=()=>{clearInterval(cameraTimer);cameraTimer=null;if(+cameraInterval.value){captureCamera();cameraTimer=setInterval(captureCamera,+cameraInterval.value)}};
 delay.oninput=()=>{presentationDelayUs=Number(delay.value)*1000000;delayValue.textContent=Number(delay.value).toFixed(2)+'s';const newest=newestTime();if(newest)viewEnd=newest-presentationDelayUs};
 useRecommended.onclick=()=>{delay.value=recommendedDelaySec;delay.oninput()};
+async function pollIdentity(){try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json());wifiSsid.textContent=s.wifi_ssid||'—';wifiIdentity.textContent='BSSID '+(s.wifi_bssid||'—')+' · channel '+(s.wifi_channel??'—')+' · gateway '+(s.wifi_gateway||'—')}catch{wifiIdentity.textContent='status unavailable'}}
+restartDevice.onclick=async()=>{if(!confirm('Restart electric-sky? Data and audio will pause briefly.'))return;restartDevice.disabled=true;restartDevice.textContent='restarting…';try{await fetch('/restart',{cache:'no-store'})}catch{}setTimeout(()=>location.reload(),8000)};
 function u64(d,o){return Number(d.getBigUint64(o,true))}
 function parsePacket(buffer){
   const d=new DataView(buffer);if(d.byteLength<92||d.getUint8(0)!==69||d.getUint8(1)!==83||d.getUint8(2)!==75||d.getUint8(3)!==89)return;
@@ -104,7 +107,7 @@ setInterval(async()=>{
   jitter.textContent=jitterEma.toFixed(1)+' ms';browserDetail.textContent='silence now/max '+currentSilence.toFixed(0)+'/'+longestSilence.toFixed(0)+'ms · sample gaps B/P/A events '+rings.temp.gapEvents+'/'+rings.power.gapEvents+'/'+rings.audio.gapEvents+' missing '+rings.temp.gaps+'/'+rings.power.gaps+'/'+rings.audio.gaps+' duration '+(rings.temp.gapUs/1e6).toFixed(1)+'/'+(rings.power.gapUs/1e6).toFixed(1)+'/'+(rings.audio.gapUs/1e6).toFixed(1)+'s · underruns '+displayUnderruns+' for '+(totalUnderrun/1000).toFixed(1)+'s · render stalls '+renderStalls+' · worst '+worstFrame.toFixed(0)+'ms';
   recommendedDelaySec=Math.min(10,Math.max(.5,Math.ceil((longestSilence+500)/250)*.25));const lead=viewEnd===null?0:(newestTime()-viewEnd)/1e6,loss=packetGaps>0||dropDelta>0,adequate=Number(delay.value)>=recommendedDelaySec;if(loss){bufferHealth.textContent='loss detected';bufferHealth.className='loss'}else if(inUnderrun||!adequate){bufferHealth.textContent=inUnderrun?'underrun':'increase delay';bufferHealth.className='low'}else{bufferHealth.textContent='healthy';bufferHealth.className='healthy'}bufferDetail.textContent='buffered '+lead.toFixed(2)+'s · configured '+Number(delay.value).toFixed(2)+'s · recommended '+recommendedDelaySec.toFixed(2)+'s from observed '+(longestSilence/1000).toFixed(2)+'s max silence'+(loss?' · permanent packet loss cannot be filled by latency':' · all observed delays covered');
 },1000);
-captureCamera();connect();requestAnimationFrame(render);
+captureCamera();connect();pollIdentity();setInterval(pollIdentity,5000);requestAnimationFrame(render);
 </script>
 </body>
 </html>)HTML";
