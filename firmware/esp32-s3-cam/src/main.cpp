@@ -214,6 +214,9 @@ volatile uint16_t cameraLastHeight = 0;
 
 static SemaphoreHandle_t latestMutex;
 static QueueHandle_t transportQueue;
+static TaskHandle_t transportTaskHandle = nullptr;
+static TaskHandle_t audioTaskHandle = nullptr;
+static TaskHandle_t pcmTaskHandle = nullptr;
 static StaticQueue_t transportQueueControl;
 static uint8_t* transportQueueStorage = nullptr;
 static volatile uint32_t transportDrops = 0;
@@ -231,6 +234,11 @@ static volatile uint32_t pcmPacketsSent = 0;
 static volatile uint32_t pcmQueueDrops = 0;
 static volatile uint32_t pcmSendFailures = 0;
 static uint8_t oscPacketBuffer[OSC_PACKET_BYTES];
+static TransportPacket transportWorkPacket;
+static TransportPacket transportStalePacket;
+static BmeSample transportBmeBatch[MAX_BME_PER_PACKET];
+static PowerSample transportPowerBatch[MAX_POWER_PER_PACKET];
+static AudioSample transportAudioBatch[MAX_AUDIO_PER_PACKET];
 static BmeSample latestBme = {};
 static PowerSample latestPower = {};
 static AudioSample latestAudio = {};
@@ -443,6 +451,9 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"wifi_rssi_dbm\":" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",";
   json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
   json += "\"min_free_heap\":" + String(ESP.getMinFreeHeap()) + ",";
+  json += "\"transport_stack_free\":" + String(transportTaskHandle ? uxTaskGetStackHighWaterMark(transportTaskHandle) : 0) + ",";
+  json += "\"audio_stack_free\":" + String(audioTaskHandle ? uxTaskGetStackHighWaterMark(audioTaskHandle) : 0) + ",";
+  json += "\"pcm_stack_free\":" + String(pcmTaskHandle ? uxTaskGetStackHighWaterMark(pcmTaskHandle) : 0) + ",";
   json += "\"timestamp\":\"" + isoTime() + "\",";
   json += "\"bme_actual_hz\":" + String(bmeActualHz, 2) + ",";
   json += "\"power_actual_hz\":" + String(powerActualHz, 2) + ",";
@@ -675,9 +686,9 @@ static bool buildBatch(TransportPacket& packet) {
   static uint32_t packetSequence = 0;
   uint32_t maxPowerIntervalUs = powerIntervalMaxUs;
   powerIntervalMaxUs = 0;
-  BmeSample bme[MAX_BME_PER_PACKET];
-  PowerSample power[MAX_POWER_PER_PACKET];
-  AudioSample audio[MAX_AUDIO_PER_PACKET];
+  BmeSample* bme = transportBmeBatch;
+  PowerSample* power = transportPowerBatch;
+  AudioSample* audio = transportAudioBatch;
 
   size_t bmeCount = bmeRing.pop(bme, MAX_BME_PER_PACKET);
   size_t powerCount = powerRing.pop(power, MAX_POWER_PER_PACKET);
@@ -713,18 +724,16 @@ static bool buildBatch(TransportPacket& packet) {
 
 static void transportTask(void*) {
   TickType_t lastWake = xTaskGetTickCount();
-  TransportPacket packet;
-  TransportPacket stale;
   while (true) {
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(TRANSPORT_INTERVAL_MS));
-    if (otaInProgress || !buildBatch(packet)) continue;
+    if (otaInProgress || !buildBatch(transportWorkPacket)) continue;
     // OSC is the live art-data path and must not wait behind a blocked
     // dashboard WebSocket client in loop().
-    sendOscBatches(packet);
-    if (xQueueSend(transportQueue, &packet, 0) != pdTRUE) {
-      xQueueReceive(transportQueue, &stale, 0);
+    sendOscBatches(transportWorkPacket);
+    if (xQueueSend(transportQueue, &transportWorkPacket, 0) != pdTRUE) {
+      xQueueReceive(transportQueue, &transportStalePacket, 0);
       transportDrops++;
-      xQueueSend(transportQueue, &packet, 0);
+      xQueueSend(transportQueue, &transportWorkPacket, 0);
     }
   }
 }
@@ -861,12 +870,12 @@ void setup() {
 
   // Start acquisition only after transport is ready so setup delays cannot
   // fill the rings and create artificial sequence gaps at boot.
-  xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 1);
-  xTaskCreatePinnedToCore(pcmTransportTask, "pcm-net", 4096, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, &audioTaskHandle, 1);
+  xTaskCreatePinnedToCore(pcmTransportTask, "pcm-net", 4096, nullptr, 3, &pcmTaskHandle, 1);
   xTaskCreatePinnedToCore(bmeTask, "bme", 4096, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(powerTask, "power", 4096, nullptr, 1, nullptr, 1);
   xTaskCreatePinnedToCore(rateTask, "rates", 3072, nullptr, 1, nullptr, 1);
-  xTaskCreatePinnedToCore(transportTask, "transport", 8192, nullptr, 4, nullptr, 1);
+  xTaskCreatePinnedToCore(transportTask, "transport", 12288, nullptr, 4, &transportTaskHandle, 1);
   Serial.println("Dashboard: http://electric-sky.local/");
 }
 
