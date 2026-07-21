@@ -33,7 +33,7 @@ constexpr uint32_t TRANSPORT_INTERVAL_MS = 63;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 63;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
-constexpr size_t TRANSPORT_PACKET_BYTES = 2048;
+constexpr size_t TRANSPORT_PACKET_BYTES = 2112;
 constexpr size_t TRANSPORT_QUEUE_DEPTH = 120;
 constexpr uint16_t INA219_CONVERSION_US = 1064;
 constexpr uint16_t OSC_ROUTER_PORT = 5005;
@@ -95,6 +95,12 @@ struct PacketHeader {
   uint16_t powerIntervalMaxUs;
   uint16_t powerDuplicatePermille;
   uint16_t powerConversionUs;
+  int16_t wifiRssiDbm;
+  uint16_t wifiReconnects;
+  uint32_t oscSendFailures;
+  uint32_t oscSendAvgUs;
+  uint32_t oscSendMaxUs;
+  uint32_t oscSendStalls;
 } __attribute__((packed));
 
 struct TransportPacket {
@@ -175,7 +181,7 @@ struct OscWriter {
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
 static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
-static_assert(sizeof(PacketHeader) == 72, "packet header changed");
+static_assert(sizeof(PacketHeader) == 92, "packet header changed");
 static_assert(sizeof(PcmPacketHeader) == 32, "PCM header changed");
 static_assert(sizeof(PcmPacket) == 672, "PCM packet changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
@@ -223,6 +229,10 @@ static volatile uint32_t transportDrops = 0;
 static volatile uint32_t oscPacketsSent = 0;
 static volatile uint32_t oscSendFailures = 0;
 static volatile uint16_t oscLargestPacket = 0;
+static volatile uint32_t oscSendAvgUs = 0;
+static volatile uint32_t oscSendMaxUs = 0;
+static volatile uint32_t oscSendStalls = 0;
+static volatile uint16_t wifiReconnects = 0;
 static QueueHandle_t pcmQueue;
 static StaticQueue_t pcmQueueControl;
 static uint8_t* pcmQueueStorage = nullptr;
@@ -307,9 +317,16 @@ static bool sendOscPacket(OscWriter& writer) {
     oscSendFailures++;
     return false;
   }
-  if (!oscUdp.beginPacket(OSC_ROUTER_IP, OSC_ROUTER_PORT) ||
-      oscUdp.write(writer.data, writer.length) != writer.length ||
-      !oscUdp.endPacket()) {
+  uint64_t startedUs = nowUs();
+  bool sent = oscUdp.beginPacket(OSC_ROUTER_IP, OSC_ROUTER_PORT);
+  if (sent) sent = oscUdp.write(writer.data, writer.length) == writer.length;
+  if (sent) sent = oscUdp.endPacket();
+  else oscUdp.stop();
+  uint32_t elapsedUs = static_cast<uint32_t>(nowUs() - startedUs);
+  oscSendAvgUs = oscSendAvgUs ? (oscSendAvgUs * 15 + elapsedUs) / 16 : elapsedUs;
+  if (elapsedUs > oscSendMaxUs) oscSendMaxUs = elapsedUs;
+  if (elapsedUs > 20000) oscSendStalls++;
+  if (!sent) {
     oscSendFailures++;
     return false;
   }
@@ -470,6 +487,10 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"osc_packets_sent\":" + String(oscPacketsSent) + ",";
   json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
   json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
+  json += "\"osc_send_avg_us\":" + String(oscSendAvgUs) + ",";
+  json += "\"osc_send_max_us\":" + String(oscSendMaxUs) + ",";
+  json += "\"osc_send_stalls\":" + String(oscSendStalls) + ",";
+  json += "\"wifi_reconnects\":" + String(wifiReconnects) + ",";
   json += "\"pcm_stream_enabled\":" + String(pcmStreamEnabled ? "true" : "false") + ",";
   json += "\"pcm_default_enabled\":false,";
   json += "\"pcm_auto_disabled\":" + String(pcmAutoDisabled ? "true" : "false") + ",";
@@ -706,7 +727,9 @@ static bool buildBatch(TransportPacket& packet) {
     static_cast<uint16_t>(uxQueueMessagesWaiting(transportQueue)), transportDrops,
     static_cast<uint16_t>(10000 / TRANSPORT_INTERVAL_MS), millis(), powerIntervalAvgUs,
     static_cast<uint16_t>(maxPowerIntervalUs > UINT16_MAX ? UINT16_MAX : maxPowerIntervalUs),
-    powerDuplicatePermille, INA219_CONVERSION_US
+    powerDuplicatePermille, INA219_CONVERSION_US,
+    static_cast<int16_t>(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0),
+    wifiReconnects, oscSendFailures, oscSendAvgUs, oscSendMaxUs, oscSendStalls
   };
 
   size_t offset = 0;
@@ -902,6 +925,7 @@ void loop() {
   if (!otaInProgress && millis() - lastWifiCheck >= 30000) {
     lastWifiCheck = millis();
     if (WiFi.status() != WL_CONNECTED) {
+      wifiReconnects++;
       const char* ssid = (++wifiFailCount % 2 == 0) ? WIFI_SSID_FB : WIFI_SSID;
       WiFi.disconnect(true);
       delay(200);
