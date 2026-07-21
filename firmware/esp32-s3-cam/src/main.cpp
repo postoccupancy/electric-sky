@@ -39,7 +39,7 @@ constexpr uint16_t INA219_CONVERSION_US = 1064;
 constexpr uint16_t OSC_ROUTER_PORT = 5005;
 constexpr uint16_t PCM_ROUTER_PORT = 5007;
 constexpr uint32_t PCM_SAMPLE_RATE = 16000;
-constexpr size_t PCM_SAMPLES_PER_PACKET = 320;
+constexpr size_t PCM_SAMPLES_PER_PACKET = 640;
 constexpr size_t PCM_QUEUE_DEPTH = 24;
 // UDP can briefly report send failures while Wi-Fi remains usable. Requiring a
 // sustained run preserves the safety cutoff without disabling audio after a
@@ -130,6 +130,14 @@ struct PcmPacket {
   int16_t samples[PCM_SAMPLES_PER_PACKET];
 } __attribute__((packed));
 
+struct EncodedPcmPacket {
+  PcmPacketHeader header;
+  int16_t predictor;
+  uint8_t index;
+  uint8_t reserved;
+  uint8_t data[PCM_SAMPLES_PER_PACKET / 2];
+} __attribute__((packed));
+
 struct OscWriter {
   uint8_t* data;
   size_t capacity;
@@ -186,7 +194,8 @@ static_assert(sizeof(PowerSample) == 24, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
 static_assert(sizeof(PacketHeader) == 92, "packet header changed");
 static_assert(sizeof(PcmPacketHeader) == 32, "PCM header changed");
-static_assert(sizeof(PcmPacket) == 672, "PCM packet changed");
+static_assert(sizeof(PcmPacket) == 1312, "PCM packet changed");
+static_assert(sizeof(EncodedPcmPacket) == 356, "encoded PCM packet changed");
 static_assert(sizeof(PacketHeader) + MAX_BME_PER_PACKET * sizeof(BmeSample) +
   MAX_POWER_PER_PACKET * sizeof(PowerSample) + MAX_AUDIO_PER_PACKET * sizeof(AudioSample)
   <= TRANSPORT_PACKET_BYTES, "transport packet buffer too small");
@@ -249,6 +258,7 @@ static volatile uint32_t pcmSendFailures = 0;
 static uint8_t oscPacketBuffer[OSC_PACKET_BYTES];
 static TransportPacket transportWorkPacket;
 static TransportPacket transportStalePacket;
+static EncodedPcmPacket encodedPcmWork;
 static BmeSample transportBmeBatch[MAX_BME_PER_PACKET];
 static PowerSample transportPowerBatch[MAX_POWER_PER_PACKET];
 static AudioSample transportAudioBatch[MAX_AUDIO_PER_PACKET];
@@ -287,6 +297,40 @@ static void setPcmStreamEnabled(bool enabled, bool automatic = false) {
 
 static uint64_t nowUs() {
   return static_cast<uint64_t>(esp_timer_get_time());
+}
+
+static const int8_t IMA_INDEX_TABLE[8] = {-1, -1, -1, -1, 2, 4, 6, 8};
+static const uint16_t IMA_STEP_TABLE[89] = {
+  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,
+  73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,
+  449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,
+  2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,
+  7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,
+  24623,27086,29794,32767
+};
+
+static size_t encodeImaAdpcm(const PcmPacket& source, EncodedPcmPacket& output) {
+  output.header = source.header;
+  output.header.bitsPerSample = 4;
+  output.header.headerBytes = sizeof(PcmPacketHeader) + 4;
+  int predictor = source.samples[0], index = 0;
+  output.predictor = predictor; output.index = index; output.reserved = 0;
+  memset(output.data, 0, sizeof(output.data));
+  for (size_t i = 1; i < source.header.sampleCount; ++i) {
+    int step = IMA_STEP_TABLE[index], difference = source.samples[i] - predictor;
+    uint8_t code = difference < 0 ? 8 : 0;
+    if (difference < 0) difference = -difference;
+    int delta = step >> 3;
+    if (difference >= step) { code |= 4; difference -= step; delta += step; }
+    if (difference >= (step >> 1)) { code |= 2; difference -= step >> 1; delta += step >> 1; }
+    if (difference >= (step >> 2)) { code |= 1; delta += step >> 2; }
+    predictor += code & 8 ? -delta : delta;
+    predictor = constrain(predictor, -32768, 32767);
+    index = constrain(index + IMA_INDEX_TABLE[code & 7], 0, 88);
+    size_t nibble = i - 1, byte = nibble / 2;
+    if (nibble & 1) output.data[byte] |= code << 4; else output.data[byte] = code;
+  }
+  return output.header.headerBytes + (source.header.sampleCount - 1 + 1) / 2;
 }
 
 static void beginOscBundle(OscWriter& writer) {
@@ -644,10 +688,10 @@ static void pcmTransportTask(void*) {
   while (true) {
     if (xQueueReceive(pcmQueue, &packet, pdMS_TO_TICKS(100)) != pdTRUE) continue;
     if (otaInProgress || !pcmStreamEnabled) continue;
-    size_t bytes = packet.header.headerBytes + packet.header.sampleCount * sizeof(int16_t);
+    size_t bytes = encodeImaAdpcm(packet, encodedPcmWork);
     if (WiFi.status() != WL_CONNECTED ||
         !pcmUdp.beginPacket(OSC_ROUTER_IP, PCM_ROUTER_PORT) ||
-        pcmUdp.write(reinterpret_cast<uint8_t*>(&packet), bytes) != bytes ||
+        pcmUdp.write(reinterpret_cast<uint8_t*>(&encodedPcmWork), bytes) != bytes ||
         !pcmUdp.endPacket()) {
       pcmSendFailures++;
       if (++pcmConsecutiveFailures >= PCM_FAILURE_LIMIT) {
