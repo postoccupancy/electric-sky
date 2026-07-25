@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>RF · moire</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #fff; overflow: hidden; font-family: 'Courier New', monospace; }
+    #canvas-container { position: fixed; inset: 0; }
+    #controls {
+      position: fixed;
+      top: 1.2em;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 0.6em;
+      z-index: 10;
+    }
+    .btn {
+      background: transparent;
+      border: 1px solid rgba(0,0,0,0.2);
+      color: rgba(0,0,0,0.4);
+      font-family: 'Courier New', monospace;
+      font-size: 0.6em;
+      letter-spacing: 0.15em;
+      padding: 0.4em 0.9em;
+      cursor: pointer;
+      text-transform: uppercase;
+    }
+    .btn.active { background: #000; color: #fff; border-color: #000; }
+    .btn:hover { border-color: #000; color: #000; }
+    #hud {
+      position: fixed;
+      bottom: 1.2em;
+      left: 1.2em;
+      color: rgba(0,0,0,0.25);
+      font-size: 0.55em;
+      letter-spacing: 0.12em;
+      line-height: 2em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+    #hud span { color: rgba(0,0,0,0.55); }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="controls">
+    <button class="btn active" onclick="setMode(0)">I · COMB</button>
+    <button class="btn" onclick="setMode(1)">II · MESH</button>
+    <button class="btn" onclick="setMode(2)">III · RINGS</button>
+  </div>
+  <div id="hud">
+    <div>TEMP <span id="temp-val">--</span> °C</div>
+    <div>BASE <span id="base-val">--</span> °C</div>
+    <div>DELTA <span id="delta-val">--</span></div>
+    <div>WS <span id="ws-val">--</span></div>
+  </div>
+
+  <script>
+  let mode = 0;
+
+  const state = {
+    tempC: null,
+    baseline: null,
+    baselineHistory: [],
+    BASELINE_WINDOW: 20,
+    delta: 0,
+    deltaNorm: 0,
+    wsConnected: false
+  };
+
+  function setMode(m) {
+    mode = m;
+    document.querySelectorAll('.btn').forEach((b, i) => b.classList.toggle('active', i === m));
+  }
+
+  function updateBaseline(temp) {
+    state.baselineHistory.push(temp);
+    if (state.baselineHistory.length > state.BASELINE_WINDOW) state.baselineHistory.shift();
+    state.baseline = state.baselineHistory.reduce((a, b) => a + b, 0) / state.baselineHistory.length;
+    state.delta = state.tempC - state.baseline;
+    state.deltaNorm = Math.max(-1, Math.min(1, state.delta / 2.0));
+  }
+
+  const host = location.host || 'adrian-pi.tailc1f637.ts.net:3000';
+  const ws = new WebSocket(`wss://${host}`);
+  ws.onopen  = () => { state.wsConnected = true;  document.getElementById('ws-val').textContent = 'connected'; };
+  ws.onclose = () => { state.wsConnected = false; document.getElementById('ws-val').textContent = 'disconnected'; };
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'sensor' && data.name === 'esp32-am2320' && data.param === 'temp_c' && data.value !== null) {
+        state.tempC = data.value;
+        updateBaseline(data.value);
+        document.getElementById('temp-val').textContent  = data.value.toFixed(2);
+        document.getElementById('base-val').textContent  = state.baseline ? state.baseline.toFixed(2) : '--';
+        document.getElementById('delta-val').textContent = state.delta.toFixed(3) + '°';
+      }
+    } catch(e) {}
+  };
+
+  new p5((p) => {
+    let angleSmoothed  = 0.04;
+    let offsetSmoothed = 0;
+
+    p.setup = () => {
+      p.createCanvas(p.windowWidth, p.windowHeight).parent('canvas-container');
+      p.frameRate(30);
+    };
+    p.windowResized = () => p.resizeCanvas(p.windowWidth, p.windowHeight);
+
+    // ── COMB: two sets of vertical lines, one rotated ──
+
+    function drawComb() {
+      const spacing = 12;
+      const thick   = 5;
+      const cx = p.width / 2, cy = p.height / 2;
+      const diag = Math.sqrt(p.width * p.width + p.height * p.height);
+      const count = Math.ceil(diag / spacing) + 2;
+
+      p.background(255);
+      p.noStroke();
+
+      // Layer A — fixed vertical lines
+      p.fill(0, 0, 0, 200);
+      for (let i = -count; i <= count; i++) {
+        p.rect(cx + i * spacing - thick / 2, 0, thick, p.height);
+      }
+
+      // Layer B — rotated lines
+      p.fill(0, 0, 0, 150);
+      p.push();
+      p.translate(cx, cy);
+      p.rotate(angleSmoothed);
+      for (let i = -count; i <= count; i++) {
+        p.rect(i * spacing - thick / 2, -diag, thick, diag * 2);
+      }
+      p.pop();
+    }
+
+    // ── MESH: two square grids, one rotated ───────────
+
+    function drawMesh() {
+      const spacing = 14;
+      const thick   = 3;
+      const cx = p.width / 2, cy = p.height / 2;
+      const diag = Math.sqrt(p.width * p.width + p.height * p.height);
+      const count = Math.ceil(diag / spacing) + 2;
+
+      p.background(255);
+      p.noStroke();
+
+      // Layer A — fixed grid
+      p.fill(0, 0, 0, 180);
+      for (let i = -count; i <= count; i++) {
+        p.rect(cx + i * spacing - thick / 2, 0, thick, p.height);
+        p.rect(0, cy + i * spacing - thick / 2, p.width, thick);
+      }
+
+      // Layer B — rotated grid
+      p.fill(0, 0, 0, 120);
+      p.push();
+      p.translate(cx, cy);
+      p.rotate(angleSmoothed);
+      for (let i = -count; i <= count; i++) {
+        p.rect(i * spacing - thick / 2, -diag, thick, diag * 2);
+        p.rect(-diag, i * spacing - thick / 2, diag * 2, thick);
+      }
+      p.pop();
+    }
+
+    // ── RINGS: two sets of concentric circles, offset ─
+
+    function drawRings() {
+      const ringSpacing = 14;
+      const thick = 3;
+      const cx = p.width / 2, cy = p.height / 2;
+      const diag = Math.sqrt(p.width * p.width + p.height * p.height);
+      const rings = Math.ceil(diag / ringSpacing) + 1;
+
+      p.background(255);
+      p.noFill();
+      p.strokeWeight(thick);
+
+      // Layer A — centered rings
+      p.stroke(0, 0, 0, 200);
+      for (let i = 1; i <= rings; i++) {
+        p.ellipse(cx, cy, i * ringSpacing * 2, i * ringSpacing * 2);
+      }
+
+      // Layer B — offset rings
+      // Center moves horizontally with temperature delta
+      const ox = cx + offsetSmoothed;
+      p.stroke(0, 0, 0, 140);
+      for (let i = 1; i <= rings; i++) {
+        p.ellipse(ox, cy, i * ringSpacing * 2, i * ringSpacing * 2);
+      }
+
+      // Mark centers
+      p.noStroke();
+      p.fill(0, 0, 0, 80);
+      p.ellipse(cx, cy, 5, 5);
+      p.fill(100, 100, 100, 100);
+      p.ellipse(ox, cy, 5, 5);
+      p.stroke(0, 0, 0, 20);
+      p.strokeWeight(0.5);
+      p.line(cx, cy, ox, cy);
+    }
+
+    function drawStatus() {
+      p.noStroke();
+      p.fill(0, 0, 0, 20);
+      p.textFont('Courier New');
+      p.textAlign(p.CENTER);
+      if (state.tempC !== null && state.baseline !== null) {
+        p.textSize(9);
+        const deg = (angleSmoothed * 180 / Math.PI).toFixed(2);
+        const px  = offsetSmoothed.toFixed(1);
+        const label = mode === 2
+          ? `Δ ${state.delta >= 0 ? '+' : ''}${state.delta.toFixed(3)}°C  ·  ${px}px offset`
+          : `Δ ${state.delta >= 0 ? '+' : ''}${state.delta.toFixed(3)}°C  ·  ${deg}° rotation`;
+        p.text(label, p.width / 2, p.height - 50);
+      } else {
+        p.textSize(10);
+        p.fill(0, 0, 0, 30);
+        p.text(state.wsConnected ? 'waiting for sensor data...' : 'connecting...', p.width / 2, p.height / 2);
+      }
+    }
+
+    p.draw = () => {
+      // Smooth rotation — used by comb and mesh
+      const targetAngle = 0.04 + state.deltaNorm * (Math.PI / 4);
+      angleSmoothed += (targetAngle - angleSmoothed) * 0.04;
+
+      // Smooth offset — used by rings
+      const maxOffset = Math.min(p.width, p.height) * 0.28;
+      offsetSmoothed += (state.deltaNorm * maxOffset - offsetSmoothed) * 0.04;
+
+      switch (mode) {
+        case 0: drawComb();  break;
+        case 1: drawMesh();  break;
+        case 2: drawRings(); break;
+      }
+      drawStatus();
+    };
+  });
+  </script>
+</body>
+</html>
