@@ -300,8 +300,12 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
 }
 
 static bool connectPreferredWifi(int attemptsPerNetwork) {
+  WiFi.mode(WIFI_STA);
   for (size_t network = 0; network < WIFI_NETWORK_COUNT; network++) {
-    WiFi.disconnect(true);
+    // Leave the station radio enabled while moving between candidates.
+    // disconnect(true) powers Wi-Fi down and can leave subsequent begin()
+    // attempts unable to associate during boot/recovery.
+    WiFi.disconnect(false, false);
     delay(250);
     Serial.printf("WiFi: trying %s\n", WIFI_NETWORKS[network].ssid);
     WiFi.begin(WIFI_NETWORKS[network].ssid, WIFI_NETWORKS[network].password);
@@ -322,8 +326,12 @@ static void resolveRouterIp() {
     oscRouterIp = resolved;
     Serial.printf("Signal router: %s\n", oscRouterIp.toString().c_str());
   } else {
-    oscRouterIp = IPAddress(192, 168, 0, 41);
-    Serial.println("Signal router discovery failed; using home fallback 192.168.0.41");
+    const bool residentLan = WiFi.SSID() == WIFI_NETWORKS[0].ssid;
+    oscRouterIp = residentLan
+      ? IPAddress(192, 168, 50, 12)
+      : IPAddress(192, 168, 0, 41);
+    Serial.printf("Signal router discovery failed; using %s fallback %s\n",
+      residentLan ? "festival" : "home", oscRouterIp.toString().c_str());
   }
 }
 
