@@ -33,7 +33,7 @@ constexpr uint32_t TRANSPORT_INTERVAL_MS = 63;
 constexpr size_t MAX_BME_PER_PACKET = 8;
 constexpr size_t MAX_POWER_PER_PACKET = 63;
 constexpr size_t MAX_AUDIO_PER_PACKET = 16;
-constexpr size_t TRANSPORT_PACKET_BYTES = 2112;
+constexpr size_t TRANSPORT_PACKET_BYTES = 3072;
 constexpr size_t TRANSPORT_QUEUE_DEPTH = 120;
 constexpr uint16_t INA219_CONVERSION_US = 1064;
 constexpr uint16_t OSC_ROUTER_PORT = 5005;
@@ -62,6 +62,9 @@ struct PowerSample {
   float busVoltage;
   float currentMa;
   float powerMw;
+  float solarBusVoltage;
+  float solarCurrentMa;
+  float solarPowerMw;
 } __attribute__((packed));
 
 struct AudioSample {
@@ -190,7 +193,7 @@ struct OscWriter {
 };
 
 static_assert(sizeof(BmeSample) == 24, "BME wire format changed");
-static_assert(sizeof(PowerSample) == 24, "power wire format changed");
+static_assert(sizeof(PowerSample) == 36, "power wire format changed");
 static_assert(sizeof(AudioSample) == 16, "audio wire format changed");
 static_assert(sizeof(PacketHeader) == 92, "packet header changed");
 static_assert(sizeof(PcmPacketHeader) == 32, "PCM header changed");
@@ -267,6 +270,7 @@ static PowerSample latestPower = {};
 static AudioSample latestAudio = {};
 static bool hasBme = false;
 static bool hasPower = false;
+static bool hasSolarPower = false;
 static bool hasAudio = false;
 RTC_DATA_ATTR uint32_t bootCount = 0;
 static esp_reset_reason_t resetReason = ESP_RST_UNKNOWN;
@@ -394,7 +398,8 @@ static void sendOscBatches(const TransportPacket& packet) {
   if (audioOffset + header.audioCount * sizeof(AudioSample) > packet.length) return;
 
   // Climate and RMS are small enough to share one sub-MTU OSC bundle.
-  if (header.bmeCount > 0 || header.audioCount > 0) {
+  if (header.bmeCount > 0 || header.audioCount > 0 ||
+      (header.powerCount > 0 && (header.flags & 0x01))) {
     OscWriter writer{oscPacketBuffer, sizeof(oscPacketBuffer)};
     beginOscBundle(writer);
     if (header.bmeCount > 0) {
@@ -444,6 +449,26 @@ static void sendOscBatches(const TransportPacket& packet) {
       }
       finishOscElement(writer, element);
     }
+    if (header.powerCount > 0 && (header.flags & 0x01)) {
+      PowerSample sample;
+      memcpy(&sample, packet.data + powerOffset +
+             (header.powerCount - 1) * sizeof(sample), sizeof(sample));
+      const char* addresses[] = {
+        "/batch/electric-sky/solar-voltage",
+        "/batch/electric-sky/solar-current"
+      };
+      const char* units[] = {"volts", "ma"};
+      const float values[] = {sample.solarBusVoltage, sample.solarCurrentMa};
+      for (size_t channel = 0; channel < 2; channel++) {
+        size_t element = beginOscElement(writer);
+        writeOscBatchHeader(writer, addresses[channel], ",idsiif", units[channel], header);
+        writer.u32(sample.sequence);
+        writer.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                        static_cast<int64_t>(header.sendTimeUs)));
+        writer.f32(values[channel]);
+        finishOscElement(writer, element);
+      }
+    }
     sendOscPacket(writer);
   }
 
@@ -469,6 +494,22 @@ static void sendOscBatches(const TransportPacket& packet) {
     }
     finishOscElement(writer, element);
     sendOscPacket(writer);
+
+    if (!(header.flags & 0x01)) return;
+    OscWriter solarWriter{oscPacketBuffer, sizeof(oscPacketBuffer)};
+    beginOscBundle(solarWriter);
+    size_t solarElement = beginOscElement(solarWriter);
+    writeOscBatchHeader(solarWriter, "/batch/electric-sky/solar-power", tags, "mw", header);
+    for (size_t i = 0; i < header.powerCount; i++) {
+      PowerSample sample;
+      memcpy(&sample, packet.data + powerOffset + i * sizeof(sample), sizeof(sample));
+      solarWriter.u32(sample.sequence);
+      solarWriter.i32(static_cast<int32_t>(static_cast<int64_t>(sample.timeUs) -
+                                           static_cast<int64_t>(header.sendTimeUs)));
+      solarWriter.f32(sample.solarPowerMw);
+    }
+    finishOscElement(solarWriter, solarElement);
+    sendOscPacket(solarWriter);
   }
 }
 
@@ -489,7 +530,7 @@ static String makeStatusJson(bool* okOut = nullptr) {
   BmeSample bme;
   PowerSample power;
   AudioSample audio;
-  bool bmeOk, powerOk, audioOk;
+  bool bmeOk, powerOk, solarPowerOk, audioOk;
 
   xSemaphoreTake(latestMutex, portMAX_DELAY);
   bme = latestBme;
@@ -497,6 +538,7 @@ static String makeStatusJson(bool* okOut = nullptr) {
   audio = latestAudio;
   bmeOk = hasBme;
   powerOk = hasPower;
+  solarPowerOk = hasSolarPower;
   audioOk = hasAudio;
   xSemaphoreGive(latestMutex);
 
@@ -565,6 +607,10 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"pressure_hpa\":" + String(bme.pressure, 4) + ",";
   json += "\"power_ok\":" + String(powerOk ? "true" : "false") + ",";
   json += "\"power_mw\":" + String(power.powerMw, 3) + ",";
+  json += "\"solar_power_ok\":" + String(solarPowerOk ? "true" : "false") + ",";
+  json += "\"solar_bus_voltage_v\":" + String(power.solarBusVoltage, 4) + ",";
+  json += "\"solar_current_ma\":" + String(power.solarCurrentMa, 3) + ",";
+  json += "\"solar_power_mw\":" + String(power.solarPowerMw, 3) + ",";
   json += "\"audio_ok\":" + String(audioOk ? "true" : "false") + ",";
   json += "\"audio_rms_db\":" + String(audio.rmsDb, 2);
   json += "}";
@@ -613,6 +659,7 @@ static void powerTask(void*) {
     }
     nextSampleUs += INA219_CONVERSION_US;
     INA219Reading reading = sensors.readPower();
+    INA219Reading solarReading = sensors.readSolarPower();
     if (!reading.ok) continue;
     uint64_t sampleTimeUs = nowUs();
     if (previousTimeUs) {
@@ -626,12 +673,16 @@ static void powerTask(void*) {
     previousTimeUs = sampleTimeUs;
     previousReading = reading;
     havePrevious = true;
-    PowerSample sample = {++sequence, sampleTimeUs, reading.busVoltageV, reading.currentMa, reading.powerMw};
+    PowerSample sample = {
+      ++sequence, sampleTimeUs, reading.busVoltageV, reading.currentMa, reading.powerMw,
+      solarReading.busVoltageV, solarReading.currentMa, solarReading.powerMw
+    };
     powerRing.push(sample);
     powerProduced++;
     xSemaphoreTake(latestMutex, portMAX_DELAY);
     latestPower = sample;
     hasPower = true;
+    hasSolarPower = solarReading.ok;
     xSemaphoreGive(latestMutex);
   }
 }
@@ -768,7 +819,8 @@ static bool buildBatch(TransportPacket& packet) {
   if (bmeCount + powerCount + audioCount == 0) return false;
 
   PacketHeader header = {
-    {'E', 'S', 'K', 'Y'}, 1, 0, sizeof(PacketHeader), ++packetSequence, nowUs(),
+    {'E', 'S', 'K', 'Y'}, 2, static_cast<uint8_t>(sensors.solarPowerAvailable() ? 0x01 : 0),
+    sizeof(PacketHeader), ++packetSequence, nowUs(),
     static_cast<uint16_t>(bmeCount), static_cast<uint16_t>(powerCount),
     static_cast<uint16_t>(audioCount), 0,
     bmeRing.overruns(), powerRing.overruns(), audioRing.overruns(),

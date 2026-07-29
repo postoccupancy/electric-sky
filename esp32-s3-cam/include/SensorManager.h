@@ -10,6 +10,8 @@ class SensorManager {
 public:
   bool begin();
   INA219Reading readPower();
+  INA219Reading readSolarPower();
+  bool solarPowerAvailable() const;
   BME280Reading readClimate();
   bool readAudio(AudioObservables& output);
   void stopAudio();
@@ -22,6 +24,8 @@ private:
   Camera camera;
   bool _cameraOk = false;
   INA219 ina;
+  INA219 solarIna{0x41};
+  bool _solarInaOk = false;
   BME280 bme;
   INMP441 mic;
 

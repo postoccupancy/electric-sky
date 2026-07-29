@@ -42,6 +42,10 @@ bool SensorManager::begin() {
   }
   Serial.println("  INA219 OK");
 
+  Serial.println("Initializing solar INA219 at 0x41...");
+  _solarInaOk = solarIna.begin(Wire);
+  Serial.println(_solarInaOk ? "  Solar INA219 OK" : "  Solar INA219 not found");
+
   Serial.println("Initializing BME280...");
   if (!bme.begin(Wire)) {
     Serial.println("  BME280 FAILED");
@@ -64,6 +68,18 @@ INA219Reading SensorManager::readPower() {
   INA219Reading reading = ina.read();
   xSemaphoreGive(_i2cMutex);
   return reading;
+}
+
+INA219Reading SensorManager::readSolarPower() {
+  if (!_solarInaOk) return {false, 0, 0, 0, 0};
+  xSemaphoreTake(_i2cMutex, portMAX_DELAY);
+  INA219Reading reading = solarIna.read();
+  xSemaphoreGive(_i2cMutex);
+  return reading;
+}
+
+bool SensorManager::solarPowerAvailable() const {
+  return _solarInaOk;
 }
 
 BME280Reading SensorManager::readClimate() {
