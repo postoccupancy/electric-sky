@@ -445,10 +445,16 @@ static bool sendOscPacket(OscWriter& writer) {
     return false;
   }
   uint64_t startedUs = nowUs();
-  bool sent = oscUdp.beginPacket(oscRouterIp, OSC_ROUTER_PORT);
-  if (sent) sent = oscUdp.write(writer.data, writer.length) == writer.length;
-  if (sent) sent = oscUdp.endPacket();
-  else oscUdp.stop();
+  bool sent = false;
+  for (uint8_t attempt = 0; attempt < 3 && !sent; attempt++) {
+    sent = oscUdp.beginPacket(oscRouterIp, OSC_ROUTER_PORT);
+    if (sent) sent = oscUdp.write(writer.data, writer.length) == writer.length;
+    if (sent) sent = oscUdp.endPacket();
+    if (!sent) {
+      oscUdp.stop();
+      if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(1));
+    }
+  }
   uint32_t elapsedUs = static_cast<uint32_t>(nowUs() - startedUs);
   oscSendAvgUs = oscSendAvgUs ? (oscSendAvgUs * 15 + elapsedUs) / 16 : elapsedUs;
   if (elapsedUs > oscSendMaxUs) oscSendMaxUs = elapsedUs;
