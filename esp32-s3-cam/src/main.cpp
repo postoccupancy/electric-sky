@@ -35,6 +35,9 @@ const WifiNetwork WIFI_NETWORKS[] = {
   {"Knight-MacDonald", "409Jasper!"}
 };
 constexpr size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
+constexpr uint32_t WIFI_PRIORITY_SCAN_INTERVAL_MS = 300000;
+constexpr uint32_t WIFI_OFFLINE_RESTART_MS = 600000;
 
 constexpr uint32_t BME_INTERVAL_MS = 10;
 constexpr uint32_t TRANSPORT_INTERVAL_MS = 63;
@@ -316,7 +319,36 @@ static bool connectPreferredWifi(int attemptsPerNetwork) {
     }
     if (WiFi.status() == WL_CONNECTED) return true;
   }
+  // Reset the station state after a complete failed cycle so a driver left
+  // stale by a vanished access point cannot remain wedged indefinitely.
+  WiFi.disconnect(true, false);
+  delay(100);
+  WiFi.mode(WIFI_STA);
   return false;
+}
+
+static int configuredWifiIndex(const String& ssid) {
+  for (size_t network = 0; network < WIFI_NETWORK_COUNT; network++) {
+    if (ssid == WIFI_NETWORKS[network].ssid) return static_cast<int>(network);
+  }
+  return -1;
+}
+
+static bool higherPriorityWifiVisible() {
+  int current = configuredWifiIndex(WiFi.SSID());
+  if (current <= 0) return false;
+  int found = WiFi.scanNetworks(false, true);
+  bool higherPriority = false;
+  for (int result = 0; result < found && !higherPriority; result++) {
+    for (int network = 0; network < current; network++) {
+      if (WiFi.SSID(result) == WIFI_NETWORKS[network].ssid) {
+        higherPriority = true;
+        break;
+      }
+    }
+  }
+  WiFi.scanDelete();
+  return higherPriority;
 }
 
 static void resolveRouterIp() {
@@ -945,6 +977,8 @@ void setup() {
     while (true) delay(1000);
   }
 
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
   bool connected = connectPreferredWifi(20);
   if (connected) {
     Serial.printf("WiFi: %s  IP: %s  RSSI: %d\n", WiFi.SSID().c_str(),
@@ -1058,11 +1092,33 @@ void loop() {
   }
 
   static uint32_t lastWifiCheck = 0;
-  if (!otaInProgress && millis() - lastWifiCheck >= 30000) {
-    lastWifiCheck = millis();
-    if (WiFi.status() != WL_CONNECTED) {
+  static uint32_t lastPriorityScan = 0;
+  static uint32_t wifiOfflineSince = 0;
+  const uint32_t nowMs = millis();
+  const bool wifiUsable = WiFi.status() == WL_CONNECTED &&
+    static_cast<uint32_t>(WiFi.localIP()) != 0;
+
+  if (wifiUsable) {
+    wifiOfflineSince = 0;
+    if (!otaInProgress &&
+        nowMs - lastPriorityScan >= WIFI_PRIORITY_SCAN_INTERVAL_MS) {
+      lastPriorityScan = nowMs;
+      if (higherPriorityWifiVisible()) {
+        wifiReconnects++;
+        if (connectPreferredWifi(12)) resolveRouterIp();
+      }
+    }
+  } else {
+    if (wifiOfflineSince == 0) wifiOfflineSince = nowMs;
+    if (!otaInProgress && nowMs - lastWifiCheck >= WIFI_RETRY_INTERVAL_MS) {
+      lastWifiCheck = nowMs;
       wifiReconnects++;
       if (connectPreferredWifi(12)) resolveRouterIp();
+    }
+    if (!otaInProgress && nowMs - wifiOfflineSince >= WIFI_OFFLINE_RESTART_MS) {
+      Serial.println("WiFi offline for 10 minutes; restarting for recovery");
+      delay(100);
+      ESP.restart();
     }
   }
   delay(1);
