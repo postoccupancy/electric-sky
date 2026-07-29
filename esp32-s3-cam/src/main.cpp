@@ -24,9 +24,17 @@
 #define FW_BUILD_UTC "unknown"
 #endif
 
-const char* WIFI_SSID = "Knight-MacDonald_EXT";
-const char* WIFI_SSID_FB = "Knight-MacDonald";
-const char* WIFI_PASSWORD = "409Jasper!";
+struct WifiNetwork {
+  const char* ssid;
+  const char* password;
+};
+
+const WifiNetwork WIFI_NETWORKS[] = {
+  {"Resident Frequency LAN", "fastfourier"},
+  {"Knight-MacDonald_EXT", "409Jasper!"},
+  {"Knight-MacDonald", "409Jasper!"}
+};
+constexpr size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
 
 constexpr uint32_t BME_INTERVAL_MS = 10;
 constexpr uint32_t TRANSPORT_INTERVAL_MS = 63;
@@ -46,7 +54,7 @@ constexpr size_t PCM_QUEUE_DEPTH = 24;
 // few congested packets.
 constexpr uint8_t PCM_FAILURE_LIMIT = 50;
 constexpr size_t OSC_PACKET_BYTES = 1472;
-const IPAddress OSC_ROUTER_IP(192, 168, 0, 41);
+IPAddress oscRouterIp(192, 168, 0, 41);
 
 struct BmeSample {
   uint32_t sequence;
@@ -291,6 +299,34 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
   }
 }
 
+static bool connectPreferredWifi(int attemptsPerNetwork) {
+  for (size_t network = 0; network < WIFI_NETWORK_COUNT; network++) {
+    WiFi.disconnect(true);
+    delay(250);
+    Serial.printf("WiFi: trying %s\n", WIFI_NETWORKS[network].ssid);
+    WiFi.begin(WIFI_NETWORKS[network].ssid, WIFI_NETWORKS[network].password);
+    for (int attempt = 0;
+         attempt < attemptsPerNetwork && WiFi.status() != WL_CONNECTED;
+         attempt++) {
+      delay(500);
+    }
+    if (WiFi.status() == WL_CONNECTED) return true;
+  }
+  return false;
+}
+
+static void resolveRouterIp() {
+  IPAddress resolved = MDNS.queryHost("adrian-pi");
+  if (!resolved) WiFi.hostByName("adrian-pi.local", resolved);
+  if (resolved) {
+    oscRouterIp = resolved;
+    Serial.printf("Signal router: %s\n", oscRouterIp.toString().c_str());
+  } else {
+    oscRouterIp = IPAddress(192, 168, 0, 41);
+    Serial.println("Signal router discovery failed; using home fallback 192.168.0.41");
+  }
+}
+
 static void setPcmStreamEnabled(bool enabled, bool automatic = false) {
   pcmStreamEnabled = enabled;
   pcmAutoDisabled = automatic && !enabled;
@@ -369,7 +405,7 @@ static bool sendOscPacket(OscWriter& writer) {
     return false;
   }
   uint64_t startedUs = nowUs();
-  bool sent = oscUdp.beginPacket(OSC_ROUTER_IP, OSC_ROUTER_PORT);
+  bool sent = oscUdp.beginPacket(oscRouterIp, OSC_ROUTER_PORT);
   if (sent) sent = oscUdp.write(writer.data, writer.length) == writer.length;
   if (sent) sent = oscUdp.endPacket();
   else oscUdp.stop();
@@ -576,7 +612,7 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"audio_overruns\":" + String(audioRing.overruns()) + ",";
   json += "\"transport_queue\":" + String(uxQueueMessagesWaiting(transportQueue)) + ",";
   json += "\"transport_drops\":" + String(transportDrops) + ",";
-  json += "\"osc_router\":\"" + OSC_ROUTER_IP.toString() + ":" + String(OSC_ROUTER_PORT) + "\",";
+  json += "\"osc_router\":\"" + oscRouterIp.toString() + ":" + String(OSC_ROUTER_PORT) + "\",";
   json += "\"osc_packets_sent\":" + String(oscPacketsSent) + ",";
   json += "\"osc_send_failures\":" + String(oscSendFailures) + ",";
   json += "\"osc_largest_packet\":" + String(oscLargestPacket) + ",";
@@ -588,7 +624,7 @@ static String makeStatusJson(bool* okOut = nullptr) {
   json += "\"pcm_default_enabled\":false,";
   json += "\"pcm_auto_disabled\":" + String(pcmAutoDisabled ? "true" : "false") + ",";
   json += "\"pcm_consecutive_failures\":" + String(pcmConsecutiveFailures) + ",";
-  json += "\"pcm_router\":\"" + OSC_ROUTER_IP.toString() + ":" + String(PCM_ROUTER_PORT) + "\",";
+  json += "\"pcm_router\":\"" + oscRouterIp.toString() + ":" + String(PCM_ROUTER_PORT) + "\",";
   json += "\"pcm_packets_queued\":" + String(pcmPacketsQueued) + ",";
   json += "\"pcm_packets_sent\":" + String(pcmPacketsSent) + ",";
   json += "\"pcm_queue\":" + String(pcmQueue ? uxQueueMessagesWaiting(pcmQueue) : 0) + ",";
@@ -745,7 +781,7 @@ static void pcmTransportTask(void*) {
     if (otaInProgress || !pcmStreamEnabled) continue;
     size_t bytes = encodeImaAdpcm(packet, encodedPcmWork);
     if (WiFi.status() != WL_CONNECTED ||
-        !pcmUdp.beginPacket(OSC_ROUTER_IP, PCM_ROUTER_PORT) ||
+        !pcmUdp.beginPacket(oscRouterIp, PCM_ROUTER_PORT) ||
         pcmUdp.write(reinterpret_cast<uint8_t*>(&encodedPcmWork), bytes) != bytes ||
         !pcmUdp.endPacket()) {
       pcmSendFailures++;
@@ -901,18 +937,7 @@ void setup() {
     while (true) delay(1000);
   }
 
-  auto tryConnect = [](const char* ssid, const char* password, int attempts) {
-    WiFi.begin(ssid, password);
-    for (int i = 0; i < attempts && WiFi.status() != WL_CONNECTED; i++) delay(500);
-    return WiFi.status() == WL_CONNECTED;
-  };
-
-  bool connected = tryConnect(WIFI_SSID, WIFI_PASSWORD, 20);
-  if (!connected) {
-    WiFi.disconnect(true);
-    delay(500);
-    connected = tryConnect(WIFI_SSID_FB, WIFI_PASSWORD, 20);
-  }
+  bool connected = connectPreferredWifi(20);
   if (connected) {
     Serial.printf("WiFi: %s  IP: %s  RSSI: %d\n", WiFi.SSID().c_str(),
       WiFi.localIP().toString().c_str(), WiFi.RSSI());
@@ -920,6 +945,7 @@ void setup() {
   WiFi.setSleep(false);
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   MDNS.begin("electric-sky");
+  if (connected) resolveRouterIp();
   setupOTA();
 
   server.on("/", []() {
@@ -1024,17 +1050,11 @@ void loop() {
   }
 
   static uint32_t lastWifiCheck = 0;
-  static uint8_t wifiFailCount = 0;
   if (!otaInProgress && millis() - lastWifiCheck >= 30000) {
     lastWifiCheck = millis();
     if (WiFi.status() != WL_CONNECTED) {
       wifiReconnects++;
-      const char* ssid = (++wifiFailCount % 2 == 0) ? WIFI_SSID_FB : WIFI_SSID;
-      WiFi.disconnect(true);
-      delay(200);
-      WiFi.begin(ssid, WIFI_PASSWORD);
-    } else {
-      wifiFailCount = 0;
+      if (connectPreferredWifi(12)) resolveRouterIp();
     }
   }
   delay(1);
