@@ -30,6 +30,7 @@ struct WifiNetwork {
 };
 
 const WifiNetwork WIFI_NETWORKS[] = {
+  {"Resident Frequency LAN_EXT", "fastfourier"},
   {"Resident Frequency LAN", "fastfourier"},
   {"Knight-MacDonald_EXT", "409Jasper!"},
   {"Knight-MacDonald", "409Jasper!"}
