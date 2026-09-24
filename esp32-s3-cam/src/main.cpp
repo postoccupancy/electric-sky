@@ -359,7 +359,10 @@ static void resolveRouterIp() {
     oscRouterIp = resolved;
     Serial.printf("Signal router: %s\n", oscRouterIp.toString().c_str());
   } else {
-    const bool residentLan = WiFi.SSID() == WIFI_NETWORKS[0].ssid;
+    const String ssid = WiFi.SSID();
+    const bool residentLan =
+      ssid == "Resident Frequency LAN_EXT" ||
+      ssid == "Resident Frequency LAN";
     oscRouterIp = residentLan
       ? IPAddress(192, 168, 50, 12)
       : IPAddress(192, 168, 0, 41);
